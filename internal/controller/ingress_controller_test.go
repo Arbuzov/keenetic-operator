@@ -60,9 +60,11 @@ var _ = Describe("Ingress controller", func() {
 		Expect(rec.Spec.Address).To(Equal("192.168.99.60"))
 		Expect(metav1.IsControlledBy(&rec, ing)).To(BeTrue())
 
-		// Drop the host from the Ingress spec: our own cleanup loop (not GC, which
+		// Swap the host in the Ingress spec: our own cleanup loop (not GC, which
 		// doesn't run under envtest) should delete the now-unwanted owned record.
-		ing.Spec.Rules = nil
+		// (Can't just nil out Rules — the apiserver rejects an Ingress with
+		// neither `rules` nor `defaultBackend`.)
+		ing.Spec.Rules[0].Host = "web2.example.com"
 		Expect(k8sClient.Update(ctx, ing)).To(Succeed())
 
 		Eventually(func() bool {
