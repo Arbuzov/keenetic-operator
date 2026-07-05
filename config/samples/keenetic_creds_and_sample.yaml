@@ -1,0 +1,22 @@
+# --- Креды роутера. НЕ коммить с реальным паролем — sealed-secrets / SOPS. ---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keenetic-creds
+  namespace: keenetic-operator-system   # неймспейс менеджера, см. config/default
+type: Opaque
+stringData:
+  KEENETIC_HOST: "192.168.99.1:22"
+  KEENETIC_USER: "<ssh-user>"
+  KEENETIC_PASSWORD: "<ssh-password>"
+  DEFAULT_INGRESS_IP: "192.168.99.x"     # адрес твоего nginx LB (fallback к status.loadBalancer)
+---
+# --- Ручная запись для не-Ingress хоста (показывает, что CRD самоценен). ---
+apiVersion: keenetic.whitediver.com/v1alpha1
+kind: KeeneticHostRecord
+metadata:
+  name: nas.whitediver.keenetic.link
+  namespace: default
+spec:
+  hostname: nas.whitediver.keenetic.link
+  address: 192.168.99.44

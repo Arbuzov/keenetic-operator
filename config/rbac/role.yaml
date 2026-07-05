@@ -1,0 +1,40 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - keenetic.whitediver.com
+  resources:
+  - keenetichostrecords
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - keenetic.whitediver.com
+  resources:
+  - keenetichostrecords/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - keenetic.whitediver.com
+  resources:
+  - keenetichostrecords/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - ingresses
+  verbs:
+  - get
+  - list
+  - watch

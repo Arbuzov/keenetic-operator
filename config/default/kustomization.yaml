@@ -1,0 +1,7 @@
+namePrefix: keenetic-operator-
+namespace: keenetic-operator-system
+
+resources:
+- ../crd
+- ../rbac
+- ../manager

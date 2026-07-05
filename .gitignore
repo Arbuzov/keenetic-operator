@@ -1,0 +1,15 @@
+# Build artifacts
+bin/
+cover.out
+
+# Go
+*.exe
+*.test
+
+# IDE
+.idea/
+*.swp
+
+# envtest downloads a local kubebuilder-tools cache outside the repo by default,
+# but guard against accidental local overrides
+/testbin/
