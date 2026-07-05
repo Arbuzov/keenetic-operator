@@ -32,3 +32,30 @@ func TestIPHostLineParsing(t *testing.T) {
 		t.Errorf("unexpected second match: %v", matches[1])
 	}
 }
+
+func TestValidateHostIP(t *testing.T) {
+	cases := []struct {
+		name    string
+		host    string
+		ip      string
+		wantErr bool
+	}{
+		{"valid fqdn", "grafana.whitediver.keenetic.link", "192.168.99.50", false},
+		{"valid single label", "nas", "192.168.99.44", false},
+		{"embedded newline injects a command", "nas\nsystem reboot", "192.168.99.44", true},
+		{"embedded space", "nas host", "192.168.99.44", true},
+		{"embedded semicolon", "nas;reboot", "192.168.99.44", true},
+		{"empty host", "", "192.168.99.44", true},
+		{"ipv4 out of range", "nas", "999.999.999.999", true},
+		{"not an ip at all", "nas", "not-an-ip", true},
+		{"ipv6 rejected", "nas", "::1", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateHostIP(tc.host, tc.ip)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("validateHostIP(%q, %q) error = %v, wantErr %v", tc.host, tc.ip, err, tc.wantErr)
+			}
+		})
+	}
+}

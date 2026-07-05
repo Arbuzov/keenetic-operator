@@ -17,10 +17,12 @@ type KeeneticHostRecordSpec struct {
 	// Hostname — FQDN, который надо зарегистрировать,
 	// например grafana.whitediver.keenetic.link
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`
 	Hostname string `json:"hostname"`
 
 	// Address — IPv4, в который резолвится Hostname (обычно LB-адрес ingress).
-	// +kubebuilder:validation:Pattern=`^(\d{1,3}\.){3}\d{1,3}$`
+	// +kubebuilder:validation:Pattern=`^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$`
 	Address string `json:"address"`
 }
 

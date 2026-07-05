@@ -65,11 +65,21 @@ func main() {
 
 	// SSH-клиент Keenetic — креды из Secret через env
 	kc := &keenetic.Client{
-		Host:     env("KEENETIC_HOST", "192.168.99.1:22"),
-		User:     os.Getenv("KEENETIC_USER"),
-		Password: os.Getenv("KEENETIC_PASSWORD"),
+		Host:               env("KEENETIC_HOST", "192.168.99.1:22"),
+		User:               os.Getenv("KEENETIC_USER"),
+		Password:           os.Getenv("KEENETIC_PASSWORD"),
+		HostKeyFingerprint: os.Getenv("KEENETIC_HOST_KEY"),
 	}
-	maxHosts, _ := strconv.Atoi(env("KEENETIC_MAX_HOSTS", "64"))
+	if kc.HostKeyFingerprint == "" {
+		setupLog.Info("KEENETIC_HOST_KEY не задан — проверка SSH host key роутера отключена (ок для LAN, для прода задайте фингерпринт)")
+	}
+
+	maxHostsEnv := env("KEENETIC_MAX_HOSTS", "64")
+	maxHosts, err := strconv.Atoi(maxHostsEnv)
+	if err != nil {
+		setupLog.Error(err, "некорректный KEENETIC_MAX_HOSTS", "value", maxHostsEnv)
+		os.Exit(1)
+	}
 
 	if err := (&controller.KeeneticHostRecordReconciler{
 		Client:   mgr.GetClient(),

@@ -92,15 +92,19 @@ func (r *KeeneticHostRecordReconciler) Reconcile(ctx context.Context, req ctrl.R
 		r.setCondition(&rec, "Ready", metav1.ConditionFalse, "LimitReached",
 			fmt.Sprintf("на роутере уже %d/%d записей ip host", count, r.MaxHosts))
 		rec.Status.Applied = false
-		_ = r.Status().Update(ctx, &rec)
+		if err := r.Status().Update(ctx, &rec); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{RequeueAfter: 10 * time.Minute}, nil
 	}
 
 	// --- желаемое состояние: запись присутствует (идемпотентно) ---
-	if err := r.Keenetic.EnsureHost(ctx, rec.Spec.Hostname, rec.Spec.Address); err != nil {
-		r.setCondition(&rec, "Ready", metav1.ConditionFalse, "ApplyFailed", err.Error())
-		_ = r.Status().Update(ctx, &rec)
-		return ctrl.Result{}, err
+	if applyErr := r.Keenetic.EnsureHost(ctx, rec.Spec.Hostname, rec.Spec.Address); applyErr != nil {
+		r.setCondition(&rec, "Ready", metav1.ConditionFalse, "ApplyFailed", applyErr.Error())
+		if err := r.Status().Update(ctx, &rec); err != nil {
+			l.Error(err, "не удалось записать статус ApplyFailed")
+		}
+		return ctrl.Result{}, applyErr
 	}
 
 	rec.Status.Applied = true

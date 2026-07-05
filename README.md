@@ -55,13 +55,15 @@ Prerequisites: a cluster, `kubectl`, and SSH access to the router.
 # 1. Install the CRD
 make install
 
-# 2. Provide router credentials (edit the values first)
-kubectl apply -f config/samples/keenetic_creds_and_sample.yaml
-
-# 3a. Run the controller locally against your kubeconfig
+# 2a. Run locally against your kubeconfig — credentials come from your shell env
+export KEENETIC_HOST=192.168.99.1:22 KEENETIC_USER=... KEENETIC_PASSWORD=...
 make run
-# 3b. …or deploy it into the cluster
+
+# 2b. …or deploy into the cluster: this creates the keenetic-operator-system
+#     namespace, so the credentials Secret must be applied after (or it has
+#     nothing to land in)
 make deploy IMG=ghcr.io/Arbuzov/keenetic-operator:latest
+kubectl apply -f config/samples/keenetic_creds_and_sample.yaml
 ```
 
 Any Ingress host then becomes a router record:
@@ -81,6 +83,7 @@ The manager reads credentials from the environment (wire them from a Secret via 
 | `KEENETIC_HOST` | `192.168.99.1:22` | Router SSH endpoint |
 | `KEENETIC_USER` | — | SSH user |
 | `KEENETIC_PASSWORD` | — | SSH password |
+| `KEENETIC_HOST_KEY` | — | Router SSH host key, as a `ssh.FingerprintSHA256` string. Unset disables host-key verification (fine for LAN, pin it for anything else) |
 | `KEENETIC_MAX_HOSTS` | `64` | `ip host` entry cap (guard) |
 | `DEFAULT_INGRESS_IP` | — | Fallback address when an Ingress has no LB IP in `status` |
 
@@ -109,6 +112,11 @@ make build          # build the manager binary
 ```
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs **lint → test → build → image (→ GHCR)** on every push.
+
+Note: envtest doesn't run Kubernetes' garbage collector, so the test suite covers the
+explicit "host removed from an Ingress's rules" cleanup path but not the
+OwnerReference cascade-delete-on-Ingress-deletion path described above — that one
+only gets exercised against a real cluster.
 
 ## Roadmap
 

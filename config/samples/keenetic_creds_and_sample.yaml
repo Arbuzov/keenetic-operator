@@ -9,6 +9,7 @@ stringData:
   KEENETIC_HOST: "192.168.99.1:22"
   KEENETIC_USER: "<ssh-user>"
   KEENETIC_PASSWORD: "<ssh-password>"
+  # KEENETIC_HOST_KEY: "SHA256:..."       # опционально: пин SSH host key роутера
   DEFAULT_INGRESS_IP: "192.168.99.x"     # адрес твоего nginx LB (fallback к status.loadBalancer)
 ---
 # --- Ручная запись для не-Ingress хоста (показывает, что CRD самоценен). ---
