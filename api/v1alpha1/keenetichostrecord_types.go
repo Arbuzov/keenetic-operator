@@ -9,7 +9,6 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // KeeneticHostRecordSpec — желаемая запись `ip host` на роутере.
@@ -64,12 +63,4 @@ type KeeneticHostRecordList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []KeeneticHostRecord `json:"items"`
-}
-
-func init() {
-	// v4.15: SchemeBuilder — это runtime.SchemeBuilder, регистрируем типы функцией.
-	SchemeBuilder.Register(func(scheme *runtime.Scheme) error {
-		scheme.AddKnownTypes(SchemeGroupVersion, &KeeneticHostRecord{}, &KeeneticHostRecordList{})
-		return nil
-	})
 }
