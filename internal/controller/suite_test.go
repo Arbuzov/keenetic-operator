@@ -11,6 +11,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -36,6 +37,13 @@ var (
 )
 
 func TestControllers(t *testing.T) {
+	// Gomega's bare Eventually() default (1s/10ms) is too tight for a full
+	// watch -> reconcile -> object-visible round trip under a loaded CI
+	// runner — observed as a real flake (Timed out after 1.000s) on
+	// GitHub Actions even though the reconcile itself was correct.
+	SetDefaultEventuallyTimeout(5 * time.Second)
+	SetDefaultEventuallyPollingInterval(100 * time.Millisecond)
+
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "Controller Suite")
 }
