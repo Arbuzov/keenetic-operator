@@ -91,6 +91,21 @@ func (c *Client) run(ctx context.Context, lines ...string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("dial %s: %w", c.Host, err)
 	}
+
+	// Ни хендшейк, ни шелл, ни запись/Wait ниже не принимают ctx напрямую,
+	// поэтому рвём tcpConn сами при отмене/дедлайне — на всём протяжении run(),
+	// а не только на dial. ssh.Client не открывает второй сокет поверх tcpConn,
+	// так что закрытие tcpConn корректно разблокирует и хендшейк, и сессию.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = tcpConn.Close()
+		case <-done:
+		}
+	}()
+
 	sshConn, chans, reqs, err := ssh.NewClientConn(tcpConn, c.Host, cfg)
 	if err != nil {
 		_ = tcpConn.Close()
@@ -98,19 +113,6 @@ func (c *Client) run(ctx context.Context, lines ...string) (string, error) {
 	}
 	conn := ssh.NewClient(sshConn, chans, reqs)
 	defer func() { _ = conn.Close() }()
-
-	// ctx покрывает только dial выше; хендшейк/шелл/запись — блокирующие
-	// вызовы без своего ctx, поэтому рвём соединение сами при отмене/дедлайне,
-	// иначе завёрнутый роутер держит мьютекс до истечения TCP-таймаутов ОС.
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = conn.Close()
-		case <-done:
-		}
-	}()
 
 	sess, err := conn.NewSession()
 	if err != nil {
