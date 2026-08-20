@@ -173,13 +173,39 @@ func (c *Client) run(ctx context.Context, lines ...string) (string, error) {
 		log.FromContext(ctx).V(1).Info("router shell exited non-zero", "err", waitErr)
 	}
 
+	// Раньше stderr шёл в тот же буфер, что и stdout. Читать их в один
+	// strings.Builder теперь нельзя — вывод разбирает наша goroutine, а stderr
+	// пишет ssh-библиотека, — но и терять его нельзя: это изменение как раз про
+	// то, чтобы отказ роутера было видно. Дописываем после Wait(), когда гонки
+	// уже нет.
+	if s := stderr.String(); s != "" {
+		out.WriteString(s)
+	}
+
 	return filterNoise(out.String()), nil
 }
 
-// cliPrompt — приглашение Keenetic CLI. Роутер печатает перед ним ESC[K и
-// перемежает эхо ввода теми же последовательностями, поэтому ищем подстроку,
-// а не совпадение со строкой целиком.
+// cliPrompt — приглашение Keenetic CLI.
 const cliPrompt = "(config)>"
+
+// ansiEscape — управляющие последовательности, которыми роутер перемежает вывод
+// (в основном ESC[K при отрисовке эха).
+var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
+
+// promptWindow — сколько хвоста держим для поиска приглашения. Приглашение
+// может разорваться между чтениями, а escape-последовательности его удлиняют,
+// так что берём с запасом.
+const promptWindow = 128
+
+// atPrompt — стоит ли поток ровно на приглашении. Важно, что это конец потока,
+// а не «где-то встретилось»: строка `(config)>` может попасться и в выводе
+// команды, и тогда мы бы сочли команду завершённой раньше времени, отправили
+// следующую и разъехались по парам команда-ответ — то есть вернули бы ровно тот
+// класс тихой рассинхронизации, ради которого всё это и написано.
+func atPrompt(window string) bool {
+	clean := ansiEscape.ReplaceAllString(window, "")
+	return strings.HasSuffix(strings.TrimRight(clean, " \t\r\n"), cliPrompt)
+}
 
 // sessionTimeout — потолок на всю сессию: логин, все команды и ответы.
 // `system configuration save` пишет во флеш и не мгновенен, поэтому запас щедрый.
@@ -190,8 +216,6 @@ const sessionTimeout = 60 * time.Second
 // приглашение так и не пришло.
 func readUntilPrompt(r io.Reader, out *strings.Builder) error {
 	buf := make([]byte, 4096)
-	// Приглашение может разорваться между чтениями, поэтому тащим за собой
-	// хвост длиной с приглашение минус байт.
 	var tail string
 	for {
 		n, readErr := r.Read(buf)
@@ -199,11 +223,11 @@ func readUntilPrompt(r io.Reader, out *strings.Builder) error {
 			chunk := string(buf[:n])
 			out.WriteString(chunk)
 			combined := tail + chunk
-			if strings.Contains(combined, cliPrompt) {
+			if atPrompt(combined) {
 				return nil
 			}
-			if len(combined) >= len(cliPrompt) {
-				combined = combined[len(combined)-len(cliPrompt)+1:]
+			if len(combined) > promptWindow {
+				combined = combined[len(combined)-promptWindow:]
 			}
 			tail = combined
 		}

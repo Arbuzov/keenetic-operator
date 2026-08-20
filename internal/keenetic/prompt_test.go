@@ -71,6 +71,37 @@ func TestReadUntilPromptSpanningReads(t *testing.T) {
 	}
 }
 
+// The prompt string appearing inside command output must not be taken for the
+// prompt. Treating any occurrence as "the router is ready" would let the next
+// command be sent early and pull the previous command's tail as its own answer —
+// the same silent command/response drift this whole change exists to remove.
+func TestReadUntilPromptIgnoresThePromptInsideOutput(t *testing.T) {
+	r := &chunkReader{chunks: []string{
+		"description entered from (config)> mode\n",
+		"more output that must still be read\n",
+		"(config)> ",
+	}}
+
+	var out strings.Builder
+	if err := readUntilPrompt(r, &out); err != nil {
+		t.Fatalf("readUntilPrompt() error = %v", err)
+	}
+	if !strings.Contains(out.String(), "must still be read") {
+		t.Errorf("stopped at a prompt-lookalike inside the output: %q", out.String())
+	}
+}
+
+// The router paints its prompt with erase-line sequences around it, so matching
+// must survive them rather than require the prompt to be the very last bytes.
+func TestReadUntilPromptToleratesAnsiAfterThePrompt(t *testing.T) {
+	r := &chunkReader{chunks: []string{"ip host nas.example.com 10.0.0.1\n(config)> \x1b[K"}}
+
+	var out strings.Builder
+	if err := readUntilPrompt(r, &out); err != nil {
+		t.Fatalf("readUntilPrompt() error = %v", err)
+	}
+}
+
 // A router that hangs up without ever prompting must surface as an error. The
 // bug this whole change is about was exactly this going unnoticed: commands were
 // written into a shell that was not listening, and nothing ever said so.
