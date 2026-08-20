@@ -145,7 +145,7 @@ rate(keenetic_router_operations_total{result="error"}[10m]) > 0
 # already existed, the router keeps resolving it to whatever address was stored
 # before the conflict, which is the more dangerous case — routing looks healthy
 # while it silently goes stale. Only a host that had no record yet is
-# unregistered. Either way it is a nil-error path, invisible in
+# unregistered. Either way, it is a nil-error path, invisible in
 # reconcile_errors_total, and it needs a human to reconcile the Ingresses; the
 # operator will not pick a winner.
 rate(keenetic_host_records_address_conflict_total[15m]) > 0
