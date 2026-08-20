@@ -11,6 +11,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"regexp"
@@ -80,6 +81,12 @@ func (c *Client) run(ctx context.Context, lines ...string) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Теперь мы блокируемся на чтении до приглашения, так что нужен потолок:
+	// молчащий роутер иначе держал бы реконсайл вечно. Отмена доходит до сокета
+	// через goroutine ниже.
+	ctx, cancel := context.WithTimeout(ctx, sessionTimeout)
+	defer cancel()
+
 	cfg := &ssh.ClientConfig{
 		User:            c.User,
 		Auth:            []ssh.AuthMethod{ssh.Password(c.Password)},
@@ -122,16 +129,38 @@ func (c *Client) run(ctx context.Context, lines ...string) (string, error) {
 	}
 	defer func() { _ = sess.Close() }()
 
-	stdin, _ := sess.StdinPipe()
-	var out strings.Builder
-	sess.Stdout = &out
-	sess.Stderr = &out
+	stdin, err := sess.StdinPipe()
+	if err != nil {
+		return "", err
+	}
+	stdout, err := sess.StdoutPipe()
+	if err != nil {
+		return "", err
+	}
+	var stderr strings.Builder
+	sess.Stderr = &stderr
 	if err := sess.Shell(); err != nil {
 		return "", err
+	}
+
+	var out strings.Builder
+
+	// Ключевой момент: CLI Keenetic не читает stdin, пока не напечатал
+	// приглашение, и всё присланное раньше молча выбрасывает. Слепая запись
+	// сразу после Shell() поэтому «удавалась», не делая ничего: и чтение
+	// running-config, и запись ip host уходили в никуда, а интерактивный шелл
+	// не возвращает кода ошибки, по которому это было бы видно.
+	if err := readUntilPrompt(stdout, &out); err != nil {
+		return "", fmt.Errorf("waiting for the router prompt: %w", err)
 	}
 	for _, ln := range lines {
 		if _, err := fmt.Fprintln(stdin, ln); err != nil {
 			return "", fmt.Errorf("write to router shell: %w", err)
+		}
+		// Дожидаемся приглашения после каждой команды: это единственный признак,
+		// что роутер её дочитал и отработал.
+		if err := readUntilPrompt(stdout, &out); err != nil {
+			return "", fmt.Errorf("waiting for the router prompt after %q: %w", ln, err)
 		}
 	}
 	if _, err := fmt.Fprintln(stdin, "exit"); err != nil {
@@ -144,7 +173,73 @@ func (c *Client) run(ctx context.Context, lines ...string) (string, error) {
 		log.FromContext(ctx).V(1).Info("router shell exited non-zero", "err", waitErr)
 	}
 
+	// Раньше stderr шёл в тот же буфер, что и stdout. Читать их в один
+	// strings.Builder теперь нельзя — вывод разбирает наша goroutine, а stderr
+	// пишет ssh-библиотека, — но и терять его нельзя: это изменение как раз про
+	// то, чтобы отказ роутера было видно. Дописываем после Wait(), когда гонки
+	// уже нет.
+	if s := stderr.String(); s != "" {
+		out.WriteString(s)
+	}
+
 	return filterNoise(out.String()), nil
+}
+
+// cliPrompt — приглашение Keenetic CLI.
+const cliPrompt = "(config)>"
+
+// ansiEscape — управляющие последовательности, которыми роутер перемежает вывод
+// (в основном ESC[K при отрисовке эха).
+var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
+
+// promptWindow — сколько хвоста держим для поиска приглашения. Приглашение
+// может разорваться между чтениями, а escape-последовательности его удлиняют,
+// так что берём с запасом.
+const promptWindow = 128
+
+// atPrompt — стоит ли поток ровно на приглашении. Строка `(config)>` может
+// попасться и в выводе команды; сочтя её приглашением, мы объявили бы команду
+// завершённой раньше времени, отправили следующую и разъехались по парам
+// команда-ответ — ровно тот класс тихой рассинхронизации, ради которого всё это
+// и написано. Поэтому сверяем всю последнюю строку целиком, а не хвост: границы
+// чтений произвольны, и чанк вполне может оборваться прямо на `(config)>`
+// посреди вывода, чего суффиксной проверке хватило бы.
+func atPrompt(window string) bool {
+	clean := strings.TrimRight(ansiEscape.ReplaceAllString(window, ""), " \t\r\n")
+	if i := strings.LastIndexAny(clean, "\r\n"); i >= 0 {
+		clean = clean[i+1:]
+	}
+	return clean == cliPrompt
+}
+
+// sessionTimeout — потолок на всю сессию: логин, все команды и ответы.
+// `system configuration save` пишет во флеш и не мгновенен, поэтому запас щедрый.
+const sessionTimeout = 60 * time.Second
+
+// readUntilPrompt дочитывает поток до следующего приглашения CLI, складывая
+// прочитанное в out. Возвращает ошибку чтения (в том числе EOF), если
+// приглашение так и не пришло.
+func readUntilPrompt(r io.Reader, out *strings.Builder) error {
+	buf := make([]byte, 4096)
+	var tail string
+	for {
+		n, readErr := r.Read(buf)
+		if n > 0 {
+			chunk := string(buf[:n])
+			out.WriteString(chunk)
+			combined := tail + chunk
+			if atPrompt(combined) {
+				return nil
+			}
+			if len(combined) > promptWindow {
+				combined = combined[len(combined)-promptWindow:]
+			}
+			tail = combined
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
 }
 
 // filterNoise выкидывает паразитные строки "no such command: cd".
