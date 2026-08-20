@@ -119,7 +119,7 @@ the operator exports what only it can see — the state of the router:
 | `keenetic_router_operations_total` | counter | `operation`, `result` | router SSH operations; `operation` is `ensure`/`delete`/`has`/`count`, `result` is `success`/`error`. Counts only attempts that reach the router — a spec rejected by validation never dials, so it stays out of `result="error"` and out of any alert on router reachability |
 | `keenetic_router_operation_duration_seconds` | histogram | `operation` | latency of one logical operation, bucketed 0.1s–12.8s. Not per SSH session: `ensure` covers the read and, when the entry is missing, the write that follows |
 | `keenetic_host_records_limit_rejected_total` | counter | — | reconciles that could not apply a record because the router is full |
-| `keenetic_host_records_address_conflict_total` | counter | — | hosts left unwritten because the Ingresses sharing them report different addresses |
+| `keenetic_host_records_address_conflict_total` | counter | — | hosts the operator stopped maintaining because the Ingresses sharing them report different addresses. An existing record keeps its pre-conflict address on the router; one that did not exist yet is never created |
 
 Deliberately *not* exported: per-record `applied`/`Ready` state. That already lives in each
 `KeeneticHostRecord`'s `.status`, and kube-state-metrics'
@@ -140,9 +140,14 @@ keenetic_router_hosts / keenetic_router_hosts_limit > 0.9
 # conflict against the API server, which reconcile_errors_total cannot.
 rate(keenetic_router_operations_total{result="error"}[10m]) > 0
 
-# Ingresses sharing a host disagree on its address, so it is registered nowhere.
-# Also a nil-error path — invisible in reconcile_errors_total, and it needs a
-# human to reconcile the Ingresses; the operator will not pick a winner.
+# Ingresses sharing a host disagree on its address, so the operator stopped
+# maintaining it. Do not read this as "the host is unreachable": if a record
+# already existed, the router keeps resolving it to whatever address was stored
+# before the conflict, which is the more dangerous case — routing looks healthy
+# while it silently goes stale. Only a host that had no record yet is
+# unregistered. Either way it is a nil-error path, invisible in
+# reconcile_errors_total, and it needs a human to reconcile the Ingresses; the
+# operator will not pick a winner.
 rate(keenetic_host_records_address_conflict_total[15m]) > 0
 ```
 

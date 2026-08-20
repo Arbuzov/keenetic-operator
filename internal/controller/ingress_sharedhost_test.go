@@ -90,6 +90,17 @@ func TestSharedHostGivesOneRecordManyOwners(t *testing.T) {
 	if got := len(rec.OwnerReferences); got != 2 {
 		t.Errorf("ownerReferences = %d, want 2 (one per Ingress sharing the host)", got)
 	}
+	// Naming them matters: the right count with the wrong owners would satisfy a
+	// bare length check while leaving an Ingress unable to keep its own record.
+	for _, ing := range []*networkingv1.Ingress{first, second} {
+		owned, err := controllerutil.HasOwnerReference(rec.OwnerReferences, ing, r.Scheme)
+		if err != nil {
+			t.Fatalf("HasOwnerReference(%s) error = %v", ing.Name, err)
+		}
+		if !owned {
+			t.Errorf("record is not owned by %s", ing.Name)
+		}
+	}
 	if controllerutil.HasControllerReference(&rec) {
 		t.Error("record carries a controller reference; that is what locked out the second Ingress")
 	}
