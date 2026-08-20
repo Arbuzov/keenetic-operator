@@ -67,6 +67,7 @@ func newRecordReconciler(t *testing.T, routerHosts int) (*KeeneticHostRecordReco
 // up on the next pass.
 func TestRouterHostsGaugePublishesTheObservedCount(t *testing.T) {
 	metrics.RouterHosts.Set(0)
+	rejectedBefore := testutil.ToFloat64(metrics.HostRecordsLimitRejected)
 
 	r, rec := newRecordReconciler(t, 5)
 
@@ -76,6 +77,11 @@ func TestRouterHostsGaugePublishesTheObservedCount(t *testing.T) {
 
 	if got := testutil.ToFloat64(metrics.RouterHosts); got != 5 {
 		t.Errorf("keenetic_router_hosts = %v, want 5 (the count read from the router this pass)", got)
+	}
+	// The other half of the limit counter's contract: it must stay put with room
+	// to spare, or an alert on it would fire on a perfectly healthy router.
+	if got := testutil.ToFloat64(metrics.HostRecordsLimitRejected) - rejectedBefore; got != 0 {
+		t.Errorf("keenetic_host_records_limit_rejected_total delta = %v, want 0 well below the cap", got)
 	}
 }
 

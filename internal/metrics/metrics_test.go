@@ -52,3 +52,37 @@ func TestObserveRouterOpNilError(t *testing.T) {
 		t.Errorf("operations{result=success} = %v, want 1", got)
 	}
 }
+
+// observedCall mirrors the production call shape exactly: the defer is
+// registered up front and err is assigned afterwards.
+func observedCall(fail bool) (err error) {
+	defer ObserveRouterOp(OpEnsure, time.Now(), &err)
+	if fail {
+		err = errors.New("router unreachable")
+	}
+	return err
+}
+
+// Calling ObserveRouterOp directly proves the labels; this proves the pattern
+// the doc comment prescribes. Taking the error by value instead of by pointer
+// still compiles and still passes the direct test — but every call would be
+// recorded as a success, because defer snapshots its arguments at the point it
+// is registered, which is before err is ever assigned.
+func TestObserveRouterOpThroughDeferredNamedReturn(t *testing.T) {
+	RouterOperations.Reset()
+	RouterOperationDuration.Reset()
+
+	if err := observedCall(false); err != nil {
+		t.Fatalf("observedCall(false) = %v, want nil", err)
+	}
+	if err := observedCall(true); err == nil {
+		t.Fatal("observedCall(true) = nil, want an error")
+	}
+
+	if got := testutil.ToFloat64(RouterOperations.WithLabelValues(OpEnsure, "success")); got != 1 {
+		t.Errorf("operations{result=success} = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(RouterOperations.WithLabelValues(OpEnsure, "error")); got != 1 {
+		t.Errorf("operations{result=error} = %v, want 1 — a by-value argument would report success here", got)
+	}
+}
