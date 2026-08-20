@@ -1,5 +1,7 @@
 # Build the manager binary
-FROM golang:1.26 AS builder
+# --platform=$BUILDPLATFORM keeps the compile native on the runner; the binary is
+# cross-produced through GOARCH below, so no QEMU emulation is needed.
+FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 

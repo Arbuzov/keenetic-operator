@@ -87,5 +87,10 @@ jobs:
         with:
           context: .
           push: true
+          # The clusters this runs on are arm64 (Raspberry Pi); a single-arch
+          # amd64 image fails to pull there with "no match for platform in
+          # manifest". CGO is off and the Dockerfile cross-compiles by GOARCH,
+          # so both arches build natively on the runner without QEMU.
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
