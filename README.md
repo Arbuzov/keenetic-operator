@@ -119,6 +119,7 @@ the operator exports what only it can see — the state of the router:
 | `keenetic_router_operations_total` | counter | `operation`, `result` | router SSH operations; `operation` is `ensure`/`delete`/`has`/`count`, `result` is `success`/`error`. Counts only attempts that reach the router — a spec rejected by validation never dials, so it stays out of `result="error"` and out of any alert on router reachability |
 | `keenetic_router_operation_duration_seconds` | histogram | `operation` | latency of one logical operation, bucketed 0.1s–12.8s. Not per SSH session: `ensure` covers the read and, when the entry is missing, the write that follows |
 | `keenetic_host_records_limit_rejected_total` | counter | — | reconciles that could not apply a record because the router is full |
+| `keenetic_host_records_address_conflict_total` | counter | — | hosts the operator stopped maintaining because the Ingresses sharing them report different addresses. An existing record keeps its pre-conflict address on the router; one that did not exist yet is never created |
 
 Deliberately *not* exported: per-record `applied`/`Ready` state. That already lives in each
 `KeeneticHostRecord`'s `.status`, and kube-state-metrics'
@@ -138,6 +139,16 @@ keenetic_router_hosts / keenetic_router_hosts_limit > 0.9
 # The router stopped answering. Distinguishes an unreachable router from a
 # conflict against the API server, which reconcile_errors_total cannot.
 rate(keenetic_router_operations_total{result="error"}[10m]) > 0
+
+# Ingresses sharing a host disagree on its address, so the operator stopped
+# maintaining it. Do not read this as "the host is unreachable": if a record
+# already existed, the router keeps resolving it to whatever address was stored
+# before the conflict, which is the more dangerous case — routing looks healthy
+# while it silently goes stale. Only a host that had no record yet is
+# unregistered. Either way, it is a nil-error path, invisible in
+# reconcile_errors_total, and it needs a human to reconcile the Ingresses; the
+# operator will not pick a winner.
+rate(keenetic_host_records_address_conflict_total[15m]) > 0
 ```
 
 `keenetic_router_hosts` publishes what the reconcile read from the router, with no
@@ -166,7 +177,12 @@ CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs **lint → test
 Note: envtest doesn't run Kubernetes' garbage collector, so the test suite covers the
 explicit "host removed from an Ingress's rules" cleanup path but not the
 OwnerReference cascade-delete-on-Ingress-deletion path described above — that one
-only gets exercised against a real cluster.
+only gets exercised against a real cluster. The same gap applies to the multi-owner
+case: that a shared record survives until the *last* owning Ingress is deleted is
+Kubernetes' own GC semantics (dependents go when every owner is gone, controller flag
+or not), and nothing here proves it. What the tests do cover is the reconciler's own
+bookkeeping — adding an owner, releasing one, and deleting the record when the last
+claim is released.
 
 ## Roadmap
 
