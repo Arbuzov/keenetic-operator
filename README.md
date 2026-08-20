@@ -101,6 +101,56 @@ On each reconcile the actuator ensures its finalizer is present, reads the route
 save`). It re-queues every few minutes, so entries deleted by hand on the router are
 restored. On deletion the finalizer runs `no ip host` before the object is removed.
 
+## Metrics
+
+The manager serves Prometheus metrics on `--metrics-bind-address` (`:8080` by default),
+plain HTTP with no authn/authz filter — fine on a trusted LAN, put it behind something
+else if that is not your situation. There is no Service in the manifests: an
+annotation-driven scrape (`prometheus.io/scrape: "true"`, `prometheus.io/port: "8080"`)
+reaches the pod directly, and no Prometheus Operator is required.
+
+Alongside the usual `controller_runtime_*`, `workqueue_*` and `rest_client_*` families,
+the operator exports what only it can see — the state of the router:
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `keenetic_router_hosts` | gauge | — | `ip host` entries on the router right now |
+| `keenetic_router_hosts_limit` | gauge | — | the configured cap (`KEENETIC_MAX_HOSTS`) |
+| `keenetic_router_operations_total` | counter | `operation`, `result` | router SSH operations; `operation` is `ensure`/`delete`/`has`/`count`, `result` is `success`/`error`. Counts only attempts that reach the router — a spec rejected by validation never dials, so it stays out of `result="error"` and out of any alert on router reachability |
+| `keenetic_router_operation_duration_seconds` | histogram | `operation` | latency of one logical operation, bucketed 0.1s–12.8s. Not per SSH session: `ensure` covers the read and, when the entry is missing, the write that follows |
+| `keenetic_host_records_limit_rejected_total` | counter | — | reconciles that could not apply a record because the router is full |
+
+Deliberately *not* exported: per-record `applied`/`Ready` state. That already lives in each
+`KeeneticHostRecord`'s `.status`, and kube-state-metrics'
+`--custom-resource-state-config` turns it into metrics without this operator growing a
+label per object.
+
+Worth alerting on:
+
+```promql
+# The router is full — new Ingress hosts are being dropped silently. This path
+# returns no error and requeues, so it is invisible in reconcile_errors_total.
+increase(keenetic_host_records_limit_rejected_total[15m]) > 0
+
+# Running out of room before it becomes an outage.
+keenetic_router_hosts / keenetic_router_hosts_limit > 0.9
+
+# The router stopped answering. Distinguishes an unreachable router from a
+# conflict against the API server, which reconcile_errors_total cannot.
+rate(keenetic_router_operations_total{result="error"}[10m]) > 0
+```
+
+`keenetic_router_hosts` publishes what the reconcile read from the router, with no
+arithmetic on top: nothing accumulates, so the value is always something the router
+actually reported. (Raise `MaxConcurrentReconciles` above its default of 1 and two passes
+can publish out of order — the value goes stale, never wrong, and the next pass corrects
+it.)
+The trade is that a record applied by the current pass shows up on the next one, so the
+gauge can lag by one entry for up to the 5-minute re-assert interval; use
+`keenetic_host_records_limit_rejected_total` when you need the exact moment the cap bites.
+It also freezes at its last value if reconciles stop altogether — pair any alert on it
+with `up` and `controller_runtime_reconcile_errors_total`.
+
 ## Development
 
 Verified against **Go 1.26**, **Kubebuilder v4.15**, **golangci-lint v2.12**.

@@ -20,6 +20,8 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/Arbuzov/keenetic-operator/internal/metrics"
 )
 
 // Client выполняет команды CLI на Keenetic по SSH.
@@ -160,11 +162,17 @@ func filterNoise(s string) string {
 }
 
 // EnsureHost идемпотентно добавляет ip host и сохраняет конфиг.
-func (c *Client) EnsureHost(ctx context.Context, host, ip string) error {
-	if err := validateHostIP(host, ip); err != nil {
+func (c *Client) EnsureHost(ctx context.Context, host, ip string) (err error) {
+	if err = validateHostIP(host, ip); err != nil {
 		return err
 	}
-	ok, err := c.HasHost(ctx, host, ip)
+	// Счётчик заводим только после валидации: кривой spec до SSH не доходит,
+	// и алерт на «роутер недоступен» не должен на нём загораться.
+	defer metrics.ObserveRouterOp(metrics.OpEnsure, time.Now(), &err)
+
+	// Именно hasHost, не HasHost: экспортированный сам себя измеряет, и через
+	// него одна неудачная проверка внутри ensure легла бы сразу в два счётчика.
+	ok, err := c.hasHost(ctx, host, ip)
 	if err != nil {
 		return err
 	}
@@ -179,15 +187,17 @@ func (c *Client) EnsureHost(ctx context.Context, host, ip string) error {
 }
 
 // DeleteHost убирает ip host и сохраняет конфиг.
-func (c *Client) DeleteHost(ctx context.Context, host, ip string) error {
-	if err := validateHostIP(host, ip); err != nil {
+func (c *Client) DeleteHost(ctx context.Context, host, ip string) (err error) {
+	if verr := validateHostIP(host, ip); verr != nil {
 		// EnsureHost validates the same input before ever writing to the router,
 		// so an invalid host/ip here could never have been applied — nothing to
 		// clean up. Returning the error would wedge the finalizer forever.
-		log.FromContext(ctx).Info("skipping router cleanup: invalid host/ip in spec", "err", err)
+		log.FromContext(ctx).Info("skipping router cleanup: invalid host/ip in spec", "err", verr)
 		return nil
 	}
-	_, err := c.run(ctx,
+	defer metrics.ObserveRouterOp(metrics.OpDelete, time.Now(), &err)
+
+	_, err = c.run(ctx,
 		fmt.Sprintf("no ip host %s %s", host, ip),
 		"system configuration save",
 	)
@@ -195,7 +205,15 @@ func (c *Client) DeleteHost(ctx context.Context, host, ip string) error {
 }
 
 // HasHost — есть ли запись в running-config.
-func (c *Client) HasHost(ctx context.Context, host, ip string) (bool, error) {
+func (c *Client) HasHost(ctx context.Context, host, ip string) (_ bool, err error) {
+	defer metrics.ObserveRouterOp(metrics.OpHas, time.Now(), &err)
+
+	return c.hasHost(ctx, host, ip)
+}
+
+// hasHost — та же проверка без метрики, для вызова изнутри другой измеряемой
+// операции.
+func (c *Client) hasHost(ctx context.Context, host, ip string) (bool, error) {
 	hosts, err := c.listHosts(ctx)
 	if err != nil {
 		return false, err
@@ -204,7 +222,9 @@ func (c *Client) HasHost(ctx context.Context, host, ip string) (bool, error) {
 }
 
 // CountHosts — число записей ip host (для гарда на 64).
-func (c *Client) CountHosts(ctx context.Context) (int, error) {
+func (c *Client) CountHosts(ctx context.Context) (_ int, err error) {
+	defer metrics.ObserveRouterOp(metrics.OpCount, time.Now(), &err)
+
 	hosts, err := c.listHosts(ctx)
 	if err != nil {
 		return 0, err

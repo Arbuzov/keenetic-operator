@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	keeneticv1alpha1 "github.com/Arbuzov/keenetic-operator/api/v1alpha1"
+	"github.com/Arbuzov/keenetic-operator/internal/metrics"
 )
 
 const hostRecordFinalizer = "keenetic.whitediver.com/finalizer"
@@ -66,6 +67,18 @@ func (r *KeeneticHostRecordReconciler) Reconcile(ctx context.Context, req ctrl.R
 			if err := r.Update(ctx, &rec); err != nil {
 				return ctrl.Result{}, err
 			}
+			// Лишнее чтение роутера на каждом удалении — да, платим сознательно.
+			// Условие «а была ли это последняя запись» стоило бы ещё одного
+			// List'а, а без освежения гейдж после удаления последней записи
+			// замирает навсегда: реконсайлить больше некого, и алерт по
+			// отношению к лимиту горел бы на мёртвом значении. Удаления редки
+			// (снятый Ingress), реконсайл и так ходит к роутеру чаще.
+			// Best-effort: удаление важнее метрики и падать на ней нельзя.
+			if n, cErr := r.Keenetic.CountHosts(ctx); cErr == nil {
+				metrics.RouterHosts.Set(float64(n))
+			} else {
+				l.V(1).Info("не удалось освежить keenetic_router_hosts после удаления", "err", cErr)
+			}
 		}
 		return ctrl.Result{}, nil
 	}
@@ -84,11 +97,21 @@ func (r *KeeneticHostRecordReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	// Только наблюдение, никакой арифметики: гейдж — это «сколько записей было
+	// на роутере в момент последнего чтения». Догонять его Inc'ом после записи
+	// значит завести read-modify-write, который накапливает расхождение, как
+	// только MaxConcurrentReconciles поднимут выше дефолтной единицы. Голый Set
+	// в худшем случае даст устаревшее (не выдуманное) значение, если два
+	// реконсайла разъедутся по порядку, и следующий проход это вылечит.
+	// Цена — отставание на одну запись до следующего реконсайла (не дольше
+	// 5 минут); упор в лимит ловится точным keenetic_host_records_limit_rejected_total.
+	metrics.RouterHosts.Set(float64(count))
 	exists, err := r.Keenetic.HasHost(ctx, rec.Spec.Hostname, rec.Spec.Address)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if !exists && count >= r.MaxHosts {
+		metrics.HostRecordsLimitRejected.Inc()
 		r.setCondition(&rec, "Ready", metav1.ConditionFalse, "LimitReached",
 			fmt.Sprintf("на роутере уже %d/%d записей ip host", count, r.MaxHosts))
 		rec.Status.Applied = false
@@ -126,6 +149,10 @@ func (r *KeeneticHostRecordReconciler) setCondition(rec *keeneticv1alpha1.Keenet
 }
 
 func (r *KeeneticHostRecordReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Константа на всё время жизни процесса — выставляем один раз, чтобы алерт
+	// писался как отношение, а не с зашитым в запрос числом 64.
+	metrics.RouterHostsLimit.Set(float64(r.MaxHosts))
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&keeneticv1alpha1.KeeneticHostRecord{}).
 		Complete(r)
