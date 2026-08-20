@@ -71,6 +71,27 @@ func TestReadUntilPromptSpanningReads(t *testing.T) {
 	}
 }
 
+// `show running-config` is far longer than the tail kept between reads, so the
+// prompt has to be found after the window has rolled many times over. This pins
+// the only arithmetic in readUntilPrompt: a tail too short to hold the newline
+// that precedes the prompt would leave it undetectable in exactly the call this
+// operator makes most.
+func TestReadUntilPromptAfterOutputLongerThanTheWindow(t *testing.T) {
+	long := strings.Repeat("ip host filler-"+strings.Repeat("x", 40)+".example.com 10.0.0.1\n", 200)
+	if len(long) <= promptWindow {
+		t.Fatalf("fixture is %d bytes, needs to exceed promptWindow (%d)", len(long), promptWindow)
+	}
+	r := &chunkReader{chunks: []string{long, "(config)> "}}
+
+	var out strings.Builder
+	if err := readUntilPrompt(r, &out); err != nil {
+		t.Fatalf("readUntilPrompt() error = %v", err)
+	}
+	if len(out.String()) < len(long) {
+		t.Errorf("output truncated: got %d bytes, want at least %d", len(out.String()), len(long))
+	}
+}
+
 // The prompt string appearing inside command output must not be taken for the
 // prompt. Treating any occurrence as "the router is ready" would let the next
 // command be sent early and pull the previous command's tail as its own answer —
