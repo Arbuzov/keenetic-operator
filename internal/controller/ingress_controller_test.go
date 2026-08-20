@@ -15,6 +15,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	keeneticv1alpha1 "github.com/Arbuzov/keenetic-operator/api/v1alpha1"
 )
@@ -58,7 +59,9 @@ var _ = Describe("Ingress controller", func() {
 		var rec keeneticv1alpha1.KeeneticHostRecord
 		Expect(k8sClient.Get(ctx, recKey, &rec)).To(Succeed())
 		Expect(rec.Spec.Address).To(Equal("192.168.99.60"))
-		Expect(metav1.IsControlledBy(&rec, ing)).To(BeTrue())
+		owned, err := controllerutil.HasOwnerReference(rec.OwnerReferences, ing, k8sClient.Scheme())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(owned).To(BeTrue())
 
 		// Swap the host in the Ingress spec: our own cleanup loop (not GC, which
 		// doesn't run under envtest) should delete the now-unwanted owned record.

@@ -77,6 +77,17 @@ var (
 		Name: "keenetic_host_records_limit_rejected_total",
 		Help: "Reconciles that could not apply a record because the router is at its `ip host` cap.",
 	})
+
+	// HostRecordsAddressConflict — хосты, для которых Ingress'ы одного
+	// namespace заявили разные адреса, так что оператор отказался выбирать.
+	// Отказ тихий по построению (nil-ошибка и RequeueAfter), то есть в
+	// reconcile_errors_total его нет — ровно тот же класс молчаливого отказа,
+	// что и упор в лимит. Тикает на каждом отложенном хосте на каждом проходе,
+	// поэтому rate() > 0 читается как «конфликт прямо сейчас».
+	HostRecordsAddressConflict = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "keenetic_host_records_address_conflict_total",
+		Help: "Hosts left unwritten because Ingresses sharing them report different addresses.",
+	})
 )
 
 func init() {
@@ -88,6 +99,7 @@ func init() {
 		RouterOperations,
 		RouterOperationDuration,
 		HostRecordsLimitRejected,
+		HostRecordsAddressConflict,
 	)
 }
 
