@@ -61,11 +61,12 @@ func newRecordReconciler(t *testing.T, routerHosts int) (*KeeneticHostRecordReco
 	}, rec
 }
 
-// The gauge publishes what CountHosts observed, with no arithmetic layered on
-// top, so nothing can accumulate into a value the router never reported. The
-// record applied by this very reconcile is therefore not counted yet — it shows
-// up on the next pass.
-func TestRouterHostsGaugePublishesTheObservedCount(t *testing.T) {
+// One reconcile with room to spare, pinning both halves of what that means. The
+// gauge publishes what CountHosts observed, with no arithmetic layered on top,
+// so nothing can accumulate into a value the router never reported — and the
+// record applied by this very reconcile is therefore not counted yet, it shows
+// up on the next pass. The rejection counter, meanwhile, must not move at all.
+func TestBelowTheCapPublishesTheCountAndRejectsNothing(t *testing.T) {
 	metrics.RouterHosts.Set(0)
 	rejectedBefore := testutil.ToFloat64(metrics.HostRecordsLimitRejected)
 
