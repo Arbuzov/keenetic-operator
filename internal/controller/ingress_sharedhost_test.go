@@ -41,7 +41,9 @@ func ingressOnSharedHost(name, lbIP string) *networkingv1.Ingress {
 			Rules: []networkingv1.IngressRule{{Host: sharedHost}},
 		},
 	}
-	ing.Status.LoadBalancer.Ingress = []networkingv1.IngressLoadBalancerIngress{{IP: lbIP}}
+	if lbIP != "" {
+		ing.Status.LoadBalancer.Ingress = []networkingv1.IngressLoadBalancerIngress{{IP: lbIP}}
+	}
 	return ing
 }
 
@@ -250,5 +252,54 @@ func TestConflictStillAttachesOwnershipToAnExistingRecord(t *testing.T) {
 	}
 	if rec.Spec.Address != "192.168.99.44" {
 		t.Errorf("spec.address = %q, want the address left untouched during the conflict", rec.Spec.Address)
+	}
+}
+
+// An Ingress still waiting for its load balancer address must not be locked out
+// of ownership. The record's address comes from what the host's Ingresses agree
+// on, not from this one, so an addressless claimant is perfectly able to hold a
+// claim — and it has to, or the addressed owner moving away would delete the
+// record and drop a host that is still being claimed.
+func TestAddresslessIngressStillTakesOwnership(t *testing.T) {
+	addressed := ingressOnSharedHost("basic-memory", "192.168.99.44")
+	waiting := ingressOnSharedHost("mcpo", "")
+
+	r, c := newIngressReconciler(t, addressed, waiting)
+	reconcileIngress(t, r, addressed)
+	reconcileIngress(t, r, waiting)
+
+	var rec keeneticv1alpha1.KeeneticHostRecord
+	key := types.NamespacedName{Name: sharedHost, Namespace: sharedNS}
+	if err := c.Get(context.Background(), key, &rec); err != nil {
+		t.Fatalf("Get(record) error = %v", err)
+	}
+	if got := len(rec.OwnerReferences); got != 2 {
+		t.Errorf("ownerReferences = %d, want 2 — the addressless Ingress claims the host too", got)
+	}
+	if rec.Spec.Address != "192.168.99.44" {
+		t.Errorf("spec.address = %q, want the address its neighbour reported", rec.Spec.Address)
+	}
+}
+
+// Nobody knowing an address yet is not a disagreement. It must not tick the
+// conflict counter, or an alert on it would fire every time an Ingress is
+// created before its controller populates status.
+func TestNoAddressAnywhereIsNotCountedAsConflict(t *testing.T) {
+	first := ingressOnSharedHost("basic-memory", "")
+	second := ingressOnSharedHost("mcpo", "")
+
+	before := testutil.ToFloat64(metrics.HostRecordsAddressConflict)
+
+	r, c := newIngressReconciler(t, first, second)
+	reconcileIngress(t, r, first)
+	reconcileIngress(t, r, second)
+
+	var rec keeneticv1alpha1.KeeneticHostRecord
+	key := types.NamespacedName{Name: sharedHost, Namespace: sharedNS}
+	if err := c.Get(context.Background(), key, &rec); !apierrors.IsNotFound(err) {
+		t.Errorf("record exists (err = %v), want none while no address is known", err)
+	}
+	if got := testutil.ToFloat64(metrics.HostRecordsAddressConflict) - before; got != 0 {
+		t.Errorf("conflict counter delta = %v, want 0 — waiting for an address is not a conflict", got)
 	}
 }
