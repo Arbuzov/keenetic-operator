@@ -303,3 +303,50 @@ func TestNoAddressAnywhereIsNotCountedAsConflict(t *testing.T) {
 		t.Errorf("conflict counter delta = %v, want 0 — waiting for an address is not a conflict", got)
 	}
 }
+
+// The last uncovered quadrant of settled/unsettled against record-exists: a host
+// that WAS settled loses every claimant's address, e.g. the ingress controller
+// restarts and clears status. The record must keep the address it last agreed
+// on. Blanking it would not merely lose the router entry — spec.address is
+// required by the CRD, so the update would be rejected and the reconcile would
+// wedge on a validation error.
+func TestAddressRegressingToNoneKeepsTheLastAgreedOne(t *testing.T) {
+	first := ingressOnSharedHost("basic-memory", "192.168.99.44")
+	second := ingressOnSharedHost("mcpo", "192.168.99.44")
+
+	r, c := newIngressReconciler(t, first, second)
+	reconcileIngress(t, r, first)
+	reconcileIngress(t, r, second)
+
+	ctx := context.Background()
+	key := types.NamespacedName{Name: sharedHost, Namespace: sharedNS}
+
+	// Both lose their load balancer address.
+	for _, name := range []string{"basic-memory", "mcpo"} {
+		var live networkingv1.Ingress
+		if err := c.Get(ctx, types.NamespacedName{Name: name, Namespace: sharedNS}, &live); err != nil {
+			t.Fatalf("Get(%s) error = %v", name, err)
+		}
+		live.Status.LoadBalancer.Ingress = nil
+		if err := c.Status().Update(ctx, &live); err != nil {
+			t.Fatalf("Status().Update(%s) error = %v", name, err)
+		}
+	}
+
+	var live networkingv1.Ingress
+	if err := c.Get(ctx, types.NamespacedName{Name: "basic-memory", Namespace: sharedNS}, &live); err != nil {
+		t.Fatalf("Get(ingress) error = %v", err)
+	}
+	reconcileIngress(t, r, &live)
+
+	var rec keeneticv1alpha1.KeeneticHostRecord
+	if err := c.Get(ctx, key, &rec); err != nil {
+		t.Fatalf("record vanished when the addresses did: %v", err)
+	}
+	if rec.Spec.Address != "192.168.99.44" {
+		t.Errorf("spec.address = %q, want the last agreed address kept", rec.Spec.Address)
+	}
+	if got := len(rec.OwnerReferences); got != 2 {
+		t.Errorf("ownerReferences = %d, want 2 — both still claim the host", got)
+	}
+}
