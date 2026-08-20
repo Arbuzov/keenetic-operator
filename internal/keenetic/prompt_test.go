@@ -91,6 +91,25 @@ func TestReadUntilPromptIgnoresThePromptInsideOutput(t *testing.T) {
 	}
 }
 
+// Read boundaries are arbitrary, so a chunk can end exactly on the prompt string
+// while it sits in the middle of a line of output. Matching a suffix would take
+// that for the prompt; matching the whole last line does not.
+func TestReadUntilPromptIgnoresAChunkEndingOnThePromptText(t *testing.T) {
+	r := &chunkReader{chunks: []string{
+		"description entered from (config)>",
+		" mode\nstill more output\n",
+		"(config)> ",
+	}}
+
+	var out strings.Builder
+	if err := readUntilPrompt(r, &out); err != nil {
+		t.Fatalf("readUntilPrompt() error = %v", err)
+	}
+	if !strings.Contains(out.String(), "still more output") {
+		t.Errorf("stopped at a chunk boundary that merely ended on the prompt text: %q", out.String())
+	}
+}
+
 // The router paints its prompt with erase-line sequences around it, so matching
 // must survive them rather than require the prompt to be the very last bytes.
 func TestReadUntilPromptToleratesAnsiAfterThePrompt(t *testing.T) {
