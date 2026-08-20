@@ -48,11 +48,11 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	addr := r.addressFor(&ing)
-	if addr == "" {
-		l.Info("для ingress пока нет адреса, ждём обновления status", "ingress", req.NamespacedName)
-		return ctrl.Result{}, nil // вернёмся, когда обновится status.loadBalancer
-	}
+	// Раннего выхода по «у этого Ingress ещё нет адреса» здесь нет намеренно.
+	// Адрес записи берётся не отсюда, а из согласия всех Ingress'ов хоста (см.
+	// ниже), поэтому безадресный Ingress всё равно обязан оформить владение:
+	// иначе сосед, у которого адрес есть, уйдёт, унесёт запись как последнюю
+	// ссылку — и хост, который мы всё ещё заявляем, исчезнет с роутера.
 
 	// желаемые записи = по одной на уникальный хост Ingress.
 	// Имя CR == hostname (валидный DNS subdomain, точки разрешены).
@@ -76,44 +76,51 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	var deferred bool
 	for host := range desired {
 		agreed := addrsByHost[host]
-		// Разногласие по адресу лечится НЕ выбором победителя: с
+		// Ровно один адрес — согласие, пишем. Ноль значит, что ни один из
+		// Ingress'ов хоста ещё не получил адрес: ждём, это не ничья ошибка.
+		// Больше одного — разошлись, и лечится это НЕ выбором победителя: с
 		// MatchEveryOwner перезапись spec будит всех владельцев, те переписывают
-		// обратно — это не «последний победил», а незатухающий цикл, и каждый
-		// его оборот доходит до роутера как `ip host` + `system configuration
+		// обратно — не «последний победил», а незатухающий цикл, каждый оборот
+		// которого доходит до роутера как `ip host` + `system configuration
 		// save`, то есть запись во флеш. Одно имя не может резолвиться в два
 		// адреса; чинится это в Ingress'ах, а не здесь.
-		conflict := len(agreed) != 1
-		if conflict {
+		settled := len(agreed) == 1
+		if len(agreed) > 1 {
 			metrics.HostRecordsAddressConflict.Inc()
 		}
 
 		rec := &keeneticv1alpha1.KeeneticHostRecord{
 			ObjectMeta: metav1.ObjectMeta{Name: host, Namespace: ing.Namespace},
 		}
-		if conflict {
-			// Владение и выбор адреса — разные вещи. Даже в конфликте мы обязаны
-			// числиться владельцем существующей записи: иначе уход другого
-			// Ingress'а снесёт её как «последнюю ссылку» вместе с нужной нам
-			// записью на роутере, и delete-событие нас даже не разбудит.
-			// А вот создать запись нельзя — spec.address обязателен в CRD.
+		if !settled {
+			// Владение и выбор адреса — разные вещи. Даже без согласованного
+			// адреса мы обязаны числиться владельцем существующей записи: иначе
+			// уход другого Ingress'а снесёт её как «последнюю ссылку» вместе с
+			// нужной нам записью на роутере, и delete-событие нас даже не
+			// разбудит. А вот создать запись нельзя — spec.address обязателен
+			// в CRD.
+			reason := "адреса ещё нет ни у одного Ingress этого хоста"
+			if len(agreed) > 1 {
+				reason = "Ingress'ы заявляют разные адреса"
+			}
 			err := r.Get(ctx, client.ObjectKeyFromObject(rec), rec)
 			if apierrors.IsNotFound(err) {
-				l.Info("хост пропущен: Ingress'ы заявляют разные адреса, записи ещё нет",
-					"host", host, "addresses", agreed)
+				l.Info("хост пропущен, записи ещё нет",
+					"host", host, "reason", reason, "addresses", agreed)
 				deferred = true
 				continue
 			}
 			if err != nil {
 				return ctrl.Result{}, err
 			}
-			l.Info("адрес не трогаем: Ingress'ы заявляют разные адреса",
-				"host", host, "addresses", agreed)
+			l.Info("адрес не трогаем, владение оформляем",
+				"host", host, "reason", reason, "addresses", agreed)
 			deferred = true
 		}
 
 		op, err := controllerutil.CreateOrUpdate(ctx, r.Client, rec, func() error {
 			rec.Spec.Hostname = host
-			if !conflict {
+			if settled {
 				rec.Spec.Address = agreed[0]
 			}
 			// Именно SetOwnerReference, а не SetControllerReference: несколько
