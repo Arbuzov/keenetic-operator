@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/netip"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -256,7 +257,7 @@ func filterNoise(s string) string {
 	return b.String()
 }
 
-// EnsureHost идемпотентно добавляет ip host и сохраняет конфиг.
+// EnsureHost идемпотентно приводит имя к ровно одному адресу и сохраняет конфиг.
 func (c *Client) EnsureHost(ctx context.Context, host, ip string) (err error) {
 	if err = validateHostIP(host, ip); err != nil {
 		return err
@@ -265,20 +266,43 @@ func (c *Client) EnsureHost(ctx context.Context, host, ip string) (err error) {
 	// и алерт на «роутер недоступен» не должен на нём загораться.
 	defer metrics.ObserveRouterOp(metrics.OpEnsure, time.Now(), &err)
 
-	// Именно hasHost, не HasHost: экспортированный сам себя измеряет, и через
+	// Именно listHosts, не HasHost: экспортированный сам себя измеряет, и через
 	// него одна неудачная проверка внутри ensure легла бы сразу в два счётчика.
-	ok, err := c.hasHost(ctx, host, ip)
+	// Полный список нужен и по существу — см. hostCommands.
+	hosts, err := c.listHosts(ctx)
 	if err != nil {
 		return err
 	}
-	if ok {
+	cmds := hostCommands(host, ip, hosts[strings.ToLower(host)])
+	if len(cmds) == 0 {
 		return nil
 	}
-	_, err = c.run(ctx,
-		fmt.Sprintf("ip host %s %s", host, ip),
-		"system configuration save",
-	)
+	_, err = c.run(ctx, append(cmds, "system configuration save")...)
 	return err
+}
+
+// hostCommands — команды, после которых у имени остаётся ровно один адрес.
+//
+// Роутер ключует статическую запись парой (имя, адрес), а не именем: второй
+// `ip host` с тем же именем не заменяет первый, а добавляет строку, и имя
+// начинает резолвиться round-robin по обоим адресам. Поэтому смена
+// spec.address — это не «добавить», а «добавить и убрать прежние»: без уборки
+// половина запросов уходила бы по старому адресу, что выглядит не как отказ, а
+// как плавающий сбой через раз.
+func hostCommands(host, ip string, current []string) []string {
+	var cmds []string
+	var found bool
+	for _, addr := range current {
+		if addr == ip {
+			found = true
+			continue
+		}
+		cmds = append(cmds, fmt.Sprintf("no ip host %s %s", host, addr))
+	}
+	if !found {
+		cmds = append(cmds, fmt.Sprintf("ip host %s %s", host, ip))
+	}
+	return cmds
 }
 
 // DeleteHost убирает ip host и сохраняет конфиг.
@@ -313,10 +337,11 @@ func (c *Client) hasHost(ctx context.Context, host, ip string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return hosts[strings.ToLower(host)] == ip, nil
+	return slices.Contains(hosts[strings.ToLower(host)], ip), nil
 }
 
-// CountHosts — число записей ip host (для гарда на 64).
+// CountHosts — число записей ip host (для гарда на 64). Считаем строки, а не
+// имена: лимит роутера — на записи, а одно имя может занимать несколько.
 func (c *Client) CountHosts(ctx context.Context) (_ int, err error) {
 	defer metrics.ObserveRouterOp(metrics.OpCount, time.Now(), &err)
 
@@ -324,17 +349,25 @@ func (c *Client) CountHosts(ctx context.Context) (_ int, err error) {
 	if err != nil {
 		return 0, err
 	}
-	return len(hosts), nil
+	n := 0
+	for _, addrs := range hosts {
+		n += len(addrs)
+	}
+	return n, nil
 }
 
-func (c *Client) listHosts(ctx context.Context) (map[string]string, error) {
+// listHosts — имя -> все его адреса. Именно срез, а не один адрес: роутер
+// разрешает несколько записей на имя (см. hostCommands), и схлопывание их в
+// map[string]string прятало бы лишние — как от проверки, так и от счётчика.
+func (c *Client) listHosts(ctx context.Context) (map[string][]string, error) {
 	out, err := c.run(ctx, "show running-config")
 	if err != nil {
 		return nil, err
 	}
-	res := map[string]string{}
+	res := map[string][]string{}
 	for _, m := range ipHostLine.FindAllStringSubmatch(out, -1) {
-		res[strings.ToLower(m[1])] = m[2]
+		host := strings.ToLower(m[1])
+		res[host] = append(res[host], m[2])
 	}
 	return res, nil
 }

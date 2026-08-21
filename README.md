@@ -97,9 +97,27 @@ The manager reads credentials from the environment (wire them from a Secret via 
 ## How it works
 
 On each reconcile the actuator ensures its finalizer is present, reads the router's
-`ip host` table, and adds the entry if missing (persisting with `system configuration
-save`). It re-queues every few minutes, so entries deleted by hand on the router are
-restored. On deletion the finalizer runs `no ip host` before the object is removed.
+`ip host` table, and converges the name onto exactly one address (persisting with
+`system configuration save`). It re-queues every few minutes, so entries deleted by hand
+on the router are restored. On deletion the finalizer runs `no ip host` before the object
+is removed.
+
+"Exactly one" is the load-bearing part. The router keys a static record on the
+**(name, address) pair**, not on the name, so a second `ip host` for a name it already
+knows does not replace the old line — it adds one, and the name starts resolving
+round-robin across both:
+
+```console
+(config)> ip host probe.invalid 10.99.99.1
+(config)> ip host probe.invalid 10.99.99.2
+(config)> show running-config
+ip host probe.invalid 10.99.99.1
+ip host probe.invalid 10.99.99.2
+```
+
+A changed `spec.address` therefore means *add the new record and drop the previous ones*.
+Doing only the first half is worse than doing nothing: half the lookups keep landing on
+the stale address, which reads as an intermittent fault rather than a clean failure.
 
 ## Metrics
 
