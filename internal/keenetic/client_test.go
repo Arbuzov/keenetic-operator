@@ -7,7 +7,10 @@ you may not use this file except in compliance with the License.
 
 package keenetic
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestFilterNoise(t *testing.T) {
 	in := "ip host grafana.example.com 192.168.99.50\nno such command: cd\nip host nas.example.com 192.168.99.44\n"
@@ -55,6 +58,52 @@ func TestValidateHostIP(t *testing.T) {
 			err := validateHostIP(tc.host, tc.ip)
 			if (err != nil) != tc.wantErr {
 				t.Errorf("validateHostIP(%q, %q) error = %v, wantErr %v", tc.host, tc.ip, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestHostCommands(t *testing.T) {
+	const host = "books.whitediver.keenetic.link"
+
+	cases := []struct {
+		name    string
+		current []string
+		want    []string
+	}{
+		{"no record yet", nil, []string{"ip host books.whitediver.keenetic.link 192.168.99.1"}},
+		{"already exactly right", []string{"192.168.99.1"}, nil},
+		{
+			// Смена адреса: без первой команды роутер оставил бы обе записи и имя
+			// резолвилось бы round-robin по старому и новому адресу.
+			"address changed",
+			[]string{"192.168.99.44"},
+			[]string{
+				"no ip host books.whitediver.keenetic.link 192.168.99.44",
+				"ip host books.whitediver.keenetic.link 192.168.99.1",
+			},
+		},
+		{
+			"stale record beside the wanted one",
+			[]string{"192.168.99.44", "192.168.99.1"},
+			[]string{"no ip host books.whitediver.keenetic.link 192.168.99.44"},
+		},
+		{
+			"several stale records",
+			[]string{"192.168.99.44", "10.0.0.9"},
+			[]string{
+				"no ip host books.whitediver.keenetic.link 192.168.99.44",
+				"no ip host books.whitediver.keenetic.link 10.0.0.9",
+				"ip host books.whitediver.keenetic.link 192.168.99.1",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := hostCommands(host, "192.168.99.1", tc.current)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("hostCommands(%v) =\n%q\nwant\n%q", tc.current, got, tc.want)
 			}
 		})
 	}
