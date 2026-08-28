@@ -30,11 +30,12 @@ import (
 )
 
 var (
-	cfg       *rest.Config
-	k8sClient client.Client
-	testEnv   *envtest.Environment
-	ctx       context.Context
-	cancel    context.CancelFunc
+	cfg           *rest.Config
+	k8sClient     client.Client
+	testEnv       *envtest.Environment
+	ctx           context.Context
+	cancel        context.CancelFunc
+	routerWebApps *fakeWebApps
 )
 
 func TestControllers(t *testing.T) {
@@ -83,10 +84,14 @@ var _ = BeforeSuite(func() {
 		MaxHosts: 64,
 	}).SetupWithManager(mgr)).To(Succeed())
 
+	// Держим ссылку в пакетной переменной: спеки проверяют не только объекты в
+	// API, но и то, что реально доехало до «роутера» — без этого не отличить
+	// «запись не тронули» от «запись снесли и завели заново».
+	routerWebApps = newFakeWebApps()
 	Expect((&KeeneticWebAppReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Keenetic: newFakeWebApps(),
+		Keenetic: routerWebApps,
 	}).SetupWithManager(mgr)).To(Succeed())
 
 	Expect((&IngressReconciler{
@@ -157,4 +162,8 @@ func (f *fakeWebApps) EnsureProxy(_ context.Context, p keenetic.Proxy) error {
 func (f *fakeWebApps) DeleteProxy(_ context.Context, name string) error {
 	delete(f.proxies, name)
 	return nil
+}
+
+func (f *fakeWebApps) CountProxies(_ context.Context) (int, error) {
+	return len(f.proxies), nil
 }

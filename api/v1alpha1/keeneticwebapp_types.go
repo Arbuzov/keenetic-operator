@@ -71,6 +71,16 @@ type KeeneticWebAppStatus struct {
 	// Applied — присутствует ли запись на роутере прямо сейчас.
 	Applied bool `json:"applied,omitempty"`
 
+	// AppliedName — под каким именем запись реально лежит на роутере.
+	// Нужен ровно для одного: роутер ключует `ip http proxy` именем, а по
+	// самому роутеру не узнать, какая из его записей была нашей. Без этого
+	// поля смена spec.name создаёт запись под новым именем и навсегда бросает
+	// старую — finalizer потом удалит только текущее имя. То же по сути, что и
+	// уборка прежнего адреса у KeeneticHostRecord, только там прежнее значение
+	// видно в конфиге роутера, а здесь — нет.
+	// +optional
+	AppliedName string `json:"appliedName,omitempty"`
+
 	// ObservedGeneration — поколение spec, на котором последний раз сошлись.
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 

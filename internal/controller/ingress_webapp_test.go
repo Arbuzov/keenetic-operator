@@ -115,6 +115,8 @@ func TestWebAppSpecRejectsBadValues(t *testing.T) {
 		"auth не булево":          {AnnAuth: "maybe"},
 		"имя записи с пробелом":   {AnnProxyName: "my notes"},
 		"имя записи слишком длин": {AnnProxyName: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		"upstream не IPv4":        {AnnUpstream: "ingress.example.com"},
+		"upstream с мусором":      {AnnUpstream: "192.168.99.44; reboot"},
 	}
 
 	for name, ann := range tests {

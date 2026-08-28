@@ -150,6 +150,20 @@ Per-Ingress annotations override the defaults; none are required:
 | `spec.securityLevel` | string | `public` \| `private`, default `public` |
 | `spec.auth` | bool | Router authentication in front of the app, default `false` |
 
+`status.appliedName` records the entry name that actually reached the router. It exists
+because the router cannot tell you which of its entries used to be yours: rename an entry
+without it and the old one is stranded on the router forever, since the finalizer only
+ever deletes the current name.
+
+Entry names are the router's key, and the default is the host's first label — so
+`notes.a.example.com` and `notes.b.example.com` both want the entry `notes`. Two objects
+asking for the same name under **different domains** is a genuine collision: both refuse to
+publish (`Ready=False`, `reason=NameConflict`) rather than overwrite each other every
+reconcile, which would be a flash write every time. Give one of them
+`keenetic.whitediver.com/proxy-name`. The **same** domain claiming a name from several
+namespaces is not a collision but the normal case — one host served by Ingresses in
+different namespaces — and the entry survives until the last of them is gone.
+
 ## How it works
 
 On each reconcile the actuator ensures its finalizer is present, reads the router's

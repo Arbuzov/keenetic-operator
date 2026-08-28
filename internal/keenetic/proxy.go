@@ -299,6 +299,17 @@ func (c *Client) GetProxy(ctx context.Context, name string) (_ Proxy, _ bool, er
 	return p, ok, nil
 }
 
+// CountProxies — число записей `ip http proxy` на роутере.
+func (c *Client) CountProxies(ctx context.Context) (_ int, err error) {
+	defer metrics.ObserveRouterOp(metrics.OpGetProxy, time.Now(), &err)
+
+	proxies, err := c.listProxies(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return len(proxies), nil
+}
+
 // listProxies — все записи `ip http proxy` из running-config. Без метрики:
 // вызывается изнутри уже измеряемых операций.
 func (c *Client) listProxies(ctx context.Context) (map[string]Proxy, error) {

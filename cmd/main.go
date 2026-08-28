@@ -119,28 +119,32 @@ func main() {
 		os.Exit(1)
 	}
 
-	upstreamPortEnv := env("DEFAULT_UPSTREAM_PORT", "80")
-	upstreamPort, err := strconv.Atoi(upstreamPortEnv)
-	if err != nil || upstreamPort < 1 || upstreamPort > 65535 {
-		setupLog.Error(err, "некорректный DEFAULT_UPSTREAM_PORT", "value", upstreamPortEnv)
-		os.Exit(1)
-	}
-
-	publishByDefault := true
-	if v := os.Getenv("PUBLISH_BY_DEFAULT"); v != "" {
-		publishByDefault, err = strconv.ParseBool(v)
-		if err != nil {
-			setupLog.Error(err, "некорректный PUBLISH_BY_DEFAULT", "value", v)
-			os.Exit(1)
-		}
-	}
-
+	// Настройки публикации разбираем только когда публикация включена. Иначе
+	// протухшее значение в DEFAULT_UPSTREAM_PORT не давало бы оператору
+	// стартовать в режиме «только DNS» — режиме, которому эта настройка вообще
+	// не нужна.
 	upstreamAddress := os.Getenv("DEFAULT_UPSTREAM_IP")
+	upstreamPort := 80
+	publishByDefault := true
 	if upstreamAddress == "" {
 		// Не фатально: так оператор ведёт только `ip host`, ровно как до
 		// появления публикаций. Сказать об этом вслух надо — иначе «почему
 		// сервис не опубликовался» пришлось бы выяснять по исходникам.
 		setupLog.Info("DEFAULT_UPSTREAM_IP не задан — веб-приложения не публикуются, ведём только DNS-записи")
+	} else {
+		upstreamPortEnv := env("DEFAULT_UPSTREAM_PORT", "80")
+		upstreamPort, err = strconv.Atoi(upstreamPortEnv)
+		if err != nil || upstreamPort < 1 || upstreamPort > 65535 {
+			setupLog.Error(err, "некорректный DEFAULT_UPSTREAM_PORT", "value", upstreamPortEnv)
+			os.Exit(1)
+		}
+		if v := os.Getenv("PUBLISH_BY_DEFAULT"); v != "" {
+			publishByDefault, err = strconv.ParseBool(v)
+			if err != nil {
+				setupLog.Error(err, "некорректный PUBLISH_BY_DEFAULT", "value", v)
+				os.Exit(1)
+			}
+		}
 	}
 
 	if err := (&controller.IngressReconciler{

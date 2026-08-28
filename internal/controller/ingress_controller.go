@@ -9,6 +9,7 @@ package controller
 
 import (
 	"context"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -459,6 +460,15 @@ func (r *IngressReconciler) webAppSpec(ctx context.Context, ing *networkingv1.In
 		// Не ошибка: без DEFAULT_UPSTREAM_IP оператор просто работает как
 		// раньше — ведёт DNS-записи и ничего не публикует.
 		l.V(1).Info("хост не публикуем: не задан upstream", "host", host, "hint", AnnUpstream)
+		return keeneticv1alpha1.KeeneticWebAppSpec{}, false
+	}
+	if addr, err := netip.ParseAddr(address); err != nil || !addr.Is4() {
+		// Проверяем здесь, а не полагаемся на схему CRD: с кривым адресом
+		// объект не пройдёт валидацию при создании, и реконсайл будет крутиться
+		// на ошибке вместо того, чтобы один раз сказать, что не так. Остальные
+		// поля ниже отсеиваются ровно так же.
+		l.Info("хост не публикуем: upstream не IPv4-адрес",
+			"host", host, "value", address, "hint", AnnUpstream)
 		return keeneticv1alpha1.KeeneticWebAppSpec{}, false
 	}
 
