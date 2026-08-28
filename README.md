@@ -118,6 +118,7 @@ The manager reads credentials from the environment (wire them from a Secret via 
 | `DEFAULT_UPSTREAM_SCHEME` | `http` | `http` or `https` |
 | `DEFAULT_SECURITY_LEVEL` | `public` | `public` (reachable from the internet) or `private` (only after signing in to the router) |
 | `PUBLISH_BY_DEFAULT` | `true` | Whether an Ingress with no publish annotation is published |
+| `KEENDNS_ZONE` | — | The router's own KeenDNS zone, e.g. `example.keenetic.link`. Hosts one label below it are published with `domain ndns`, the only form that claims a name in KeenDNS. Leave it unset only for your own domains |
 
 Per-Ingress annotations override the defaults; none are required:
 
@@ -126,7 +127,7 @@ Per-Ingress annotations override the defaults; none are required:
 | `keenetic.whitediver.com/publish` | `PUBLISH_BY_DEFAULT` | `false` keeps this Ingress off the router's proxy table (its DNS record is still maintained). A value that isn't a boolean is treated as `false` — a typo must not silently expose a service |
 | `keenetic.whitediver.com/upstream` | `DEFAULT_UPSTREAM_IP` | Where the router forwards |
 | `keenetic.whitediver.com/upstream-port` | `DEFAULT_UPSTREAM_PORT` | |
-| `keenetic.whitediver.com/upstream-scheme` | `DEFAULT_UPSTREAM_SCHEME` | |
+| `keenetic.whitediver.com/upstream-scheme` | derived, then `DEFAULT_UPSTREAM_SCHEME` | Without the annotation the scheme comes from the Ingresses themselves: a host that any Ingress serves over TLS (a `spec.tls` section covering it, or an explicit `ssl-redirect` annotation) is published as `https`/443, because ingress-nginx answers such a host on :80 with a redirect to https — which resolves back to the router, which proxies to :80 again |
 | `keenetic.whitediver.com/security-level` | `DEFAULT_SECURITY_LEVEL` | |
 | `keenetic.whitediver.com/auth` | `false` | Require the router's own authentication in front of the app |
 | `keenetic.whitediver.com/proxy-name` | first label of the host | Entry name in the router config (`ip http proxy <name>`) |
@@ -196,10 +197,14 @@ in a nested CLI context — so the actuator writes:
 
 ```console
 (config)> ip http proxy notes
-(config-proxy)> domain static notes.whitediver.keenetic.link
+(config-proxy)> domain ndns
 (config-proxy)> upstream http 192.168.99.44 80
 (config-proxy)> security-level public
-(config-proxy)> no auth
+(config-proxy)> ssl redirect
+(config-proxy)> x-real-ip
+(config-proxy)> preserve-host
+(config-proxy)> preserve-referer
+(config-proxy)> preserve-origin
 (config-proxy)> exit
 (config)> system configuration save
 ```
@@ -209,6 +214,15 @@ Two consequences worth knowing:
 - The session has to recognise `(config-proxy)>` as a prompt. Waiting for the top-level
   `(config)>` there does not fail — it *stalls* until the session timeout, which is the
   least legible way a write can go wrong.
+- **`domain` takes the zone, not the FQDN.** The router builds the published name itself
+  as `<entry name>.<domain>`, so `domain static notes.example.keenetic.link` publishes
+  `notes.notes.example.keenetic.link`. The real name is then claimed by nobody and the
+  router answers it with its own web panel — a 200 with the wrong body, which is why this
+  cost an outage before it was noticed. Inside the router's own KeenDNS zone the form to
+  use is `domain ndns`; `domain static` there produces a valid entry that never publishes.
+  The two are compared strictly for the same reason.
+- `preserve-host` is not cosmetic. Without it the router forwards `Host: <upstream ip>`,
+  no ingress rule matches, and every published host answers 404.
 - Comparison before writing is deliberately lenient: a field the router did not print is
   treated as matching. Every rewrite is a `system configuration save`, i.e. a flash write,
   repeated every 5 minutes forever; a field the router stores but does not display would

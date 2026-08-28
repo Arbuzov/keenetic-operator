@@ -32,6 +32,7 @@ func publishingReconciler() *IngressReconciler {
 		DefaultUpstreamScheme:  "http",
 		DefaultSecurityLevel:   "public",
 		PublishByDefault:       true,
+		KeenDNSZone:            "example.keenetic.link",
 	}
 }
 
@@ -44,15 +45,17 @@ func ingressWith(annotations map[string]string) *networkingv1.Ingress {
 func TestWebAppSpecUsesDefaultsWithoutAnnotations(t *testing.T) {
 	r := publishingReconciler()
 
-	got, ok := r.webAppSpec(context.Background(), ingressWith(nil), "notes.example.keenetic.link")
+	got, ok := r.webAppSpec(context.Background(), ingressWith(nil), "notes.example.keenetic.link", false)
 	if !ok {
 		t.Fatal("webAppSpec() = false, want a spec")
 	}
 
 	want := keeneticv1alpha1.KeeneticWebAppSpec{
 		// Имя записи — первая метка хоста: так же выбирает сам роутер.
-		Name:            "notes",
-		Domain:          "notes.example.keenetic.link",
+		Name:   "notes",
+		Domain: "notes.example.keenetic.link",
+		// Хост лежит прямо в зоне KeenDNS — публиковать его можно только ndns.
+		NDNS:            true,
 		UpstreamAddress: "192.168.99.44",
 		UpstreamPort:    80,
 		UpstreamScheme:  "http",
@@ -74,7 +77,7 @@ func TestWebAppSpecHonoursAnnotations(t *testing.T) {
 		AnnAuth:           "true",
 	})
 
-	got, ok := r.webAppSpec(context.Background(), ing, "notes.example.keenetic.link")
+	got, ok := r.webAppSpec(context.Background(), ing, "notes.example.keenetic.link", false)
 	if !ok {
 		t.Fatal("webAppSpec() = false, want a spec")
 	}
@@ -82,6 +85,7 @@ func TestWebAppSpecHonoursAnnotations(t *testing.T) {
 	want := keeneticv1alpha1.KeeneticWebAppSpec{
 		Name:            "my-notes",
 		Domain:          "notes.example.keenetic.link",
+		NDNS:            true,
 		UpstreamAddress: "192.168.99.50",
 		UpstreamPort:    8443,
 		UpstreamScheme:  "https",
@@ -99,7 +103,7 @@ func TestWebAppSpecSkipsWithoutAnUpstream(t *testing.T) {
 	r := publishingReconciler()
 	r.DefaultUpstreamAddress = ""
 
-	if _, ok := r.webAppSpec(context.Background(), ingressWith(nil), "notes.example.keenetic.link"); ok {
+	if _, ok := r.webAppSpec(context.Background(), ingressWith(nil), "notes.example.keenetic.link", false); ok {
 		t.Error("webAppSpec() = true, want false without an upstream")
 	}
 }
@@ -122,7 +126,7 @@ func TestWebAppSpecRejectsBadValues(t *testing.T) {
 	for name, ann := range tests {
 		t.Run(name, func(t *testing.T) {
 			r := publishingReconciler()
-			if _, ok := r.webAppSpec(context.Background(), ingressWith(ann), "notes.example.keenetic.link"); ok {
+			if _, ok := r.webAppSpec(context.Background(), ingressWith(ann), "notes.example.keenetic.link", false); ok {
 				t.Errorf("webAppSpec(%v) = true, want false", ann)
 			}
 		})
@@ -135,7 +139,7 @@ func TestWebAppSpecSkipsAHostWithAnUnusableLabel(t *testing.T) {
 	r := publishingReconciler()
 
 	long := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example.keenetic.link" // 33 символа в метке
-	if _, ok := r.webAppSpec(context.Background(), ingressWith(nil), long); ok {
+	if _, ok := r.webAppSpec(context.Background(), ingressWith(nil), long, false); ok {
 		t.Error("webAppSpec() = true, want false for an over-long label")
 	}
 }
@@ -172,6 +176,97 @@ func TestPublishes(t *testing.T) {
 				t.Errorf("publishes() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// Хост вне зоны KeenDNS роутера ndns'ом публиковать нельзя: роутер подставил бы
+// СВОЮ зону и опубликовал не тот адрес.
+func TestWebAppSpecUsesStaticDomainOutsideTheKeenDNSZone(t *testing.T) {
+	r := publishingReconciler()
+
+	got, ok := r.webAppSpec(context.Background(), ingressWith(nil), "notes.example.com", false)
+	if !ok {
+		t.Fatal("webAppSpec() = false, want a spec")
+	}
+	if got.NDNS {
+		t.Errorf("NDNS = true for a host outside %q", r.KeenDNSZone)
+	}
+}
+
+// Глубже одной метки ndns тоже не годится: роутер собирает имя как
+// <запись>.<зона>, то есть ровно одну метку сверху.
+func TestWebAppSpecDoesNotUseNDNSDeeperThanOneLabel(t *testing.T) {
+	r := publishingReconciler()
+
+	got, ok := r.webAppSpec(context.Background(), ingressWith(nil), "a.b.example.keenetic.link", false)
+	if !ok {
+		t.Fatal("webAppSpec() = false, want a spec")
+	}
+	if got.NDNS {
+		t.Error("NDNS = true for a host two labels below the zone")
+	}
+}
+
+// Хост с TLS обязан идти по https: ingress-nginx редиректит :80 на https, имя
+// резолвится обратно в роутер, и получается петля редиректов, а не отказ.
+func TestWebAppSpecSwitchesToHTTPSWhenTheHostRequiresTLS(t *testing.T) {
+	r := publishingReconciler()
+
+	got, ok := r.webAppSpec(context.Background(), ingressWith(nil), "dev.example.keenetic.link", true)
+	if !ok {
+		t.Fatal("webAppSpec() = false, want a spec")
+	}
+	if got.UpstreamScheme != "https" || got.UpstreamPort != 443 {
+		t.Errorf("upstream = %s/%d, want https/443", got.UpstreamScheme, got.UpstreamPort)
+	}
+}
+
+// Явный порт важнее вывода из TLS: его задали руками, значит знают, что делают.
+func TestWebAppSpecKeepsAnAnnotatedPortUnderTLS(t *testing.T) {
+	r := publishingReconciler()
+	ing := ingressWith(map[string]string{AnnUpstreamPort: "8443"})
+
+	got, ok := r.webAppSpec(context.Background(), ing, "dev.example.keenetic.link", true)
+	if !ok {
+		t.Fatal("webAppSpec() = false, want a spec")
+	}
+	if got.UpstreamScheme != "https" || got.UpstreamPort != 8443 {
+		t.Errorf("upstream = %s/%d, want https/8443", got.UpstreamScheme, got.UpstreamPort)
+	}
+}
+
+func TestIngressRequiresTLS(t *testing.T) {
+	host := "dev.example.keenetic.link"
+
+	withTLS := ingressWith(nil)
+	withTLS.Spec.TLS = []networkingv1.IngressTLS{{Hosts: []string{host}}}
+	if !ingressRequiresTLS(withTLS, host) {
+		t.Error("spec.tls covering the host: got false, want true")
+	}
+
+	// Секция без списка хостов покрывает весь Ingress.
+	blanket := ingressWith(nil)
+	blanket.Spec.TLS = []networkingv1.IngressTLS{{SecretName: "x"}}
+	if !ingressRequiresTLS(blanket, host) {
+		t.Error("spec.tls without hosts: got false, want true")
+	}
+
+	otherHost := ingressWith(nil)
+	otherHost.Spec.TLS = []networkingv1.IngressTLS{{Hosts: []string{"other.example.keenetic.link"}}}
+	if ingressRequiresTLS(otherHost, host) {
+		t.Error("spec.tls for another host: got true, want false")
+	}
+
+	// Аннотация перебивает: у books/notes/photos тут стоит ssl-redirect=false
+	// при наличии TLS-секции, и редиректа там нет.
+	off := ingressWith(map[string]string{"nginx.ingress.kubernetes.io/ssl-redirect": "false"})
+	off.Spec.TLS = []networkingv1.IngressTLS{{Hosts: []string{host}}}
+	if ingressRequiresTLS(off, host) {
+		t.Error("ssl-redirect=false with TLS: got true, want false")
+	}
+
+	if ingressRequiresTLS(ingressWith(nil), host) {
+		t.Error("no TLS and no annotation: got true, want false")
 	}
 }
 

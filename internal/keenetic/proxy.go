@@ -27,22 +27,52 @@ import (
 type Proxy struct {
 	// Name — идентификатор записи в конфиге. Удаление идёт по нему, не по домену.
 	Name string
-	// Domain — FQDN из `domain static`. Пусто, если запись стоит на `domain ndns`.
-	Domain string
-	// DomainNDNS — запись использует `domain ndns`, то есть FQDN достраивается
-	// роутером из зоны KeenDNS и в конфиге не написан.
-	DomainNDNS bool
+
+	// Zone — аргумент `domain static`. Это ЗОНА, а не FQDN: опубликованное имя
+	// роутер собирает сам как `<Name>.<Zone>`. Записанный сюда полный хост даёт
+	// dev.dev.example.keenetic.link — имя, которого нет, после чего роутер
+	// отвечает на настоящее имя своим веб-интерфейсом. Проверено на живом
+	// роутере, стоило простоя всех опубликованных сервисов.
+	Zone string
+	// NDNS — запись стоит на `domain ndns`: зону подставляет сам роутер из
+	// своего имени KeenDNS. Ровно так выглядят записи, заведённые через
+	// веб-интерфейс, и только они публикуются в KeenDNS.
+	NDNS bool
+
 	// Scheme — http | https (первый аргумент `upstream`).
-	Scheme  string
+	Scheme string
+	// Address — IPv4 или MAC. Роутер принимает оба (`upstream http
+	// e4:5f:01:1e:16:46 8123` — живая запись), поэтому парсер не сужает.
 	Address string
 	Port    int32
+
 	// SecurityLevel — public | private. Пусто, если роутер строку не напечатал.
 	SecurityLevel string
+
+	// Заголовки и редирект, как у записей из веб-интерфейса. PreserveHost —
+	// не косметика: без него роутер уходит на upstream с `Host: <ip>`, ни одно
+	// правило ingress-контроллера не совпадает, и публикация отвечает 404.
+	SSLRedirect     bool
+	XRealIP         bool
+	PreserveHost    bool
+	PreserveReferer bool
+	PreserveOrigin  bool
+
 	// Auth / AuthSet — `auth` / `no auth`. AuthSet различает «роутер сказал
 	// no auth» и «роутер про auth не написал вовсе»; без этого отсутствие
 	// строки читалось бы как явный false и гоняло бы нас на перезапись.
 	Auth    bool
 	AuthSet bool
+}
+
+// ZoneOf — родительская зона FQDN: то, что роутер ждёт в `domain static`.
+// Для notes.example.keenetic.link это example.keenetic.link.
+func ZoneOf(fqdn string) string {
+	_, zone, found := strings.Cut(fqdn, ".")
+	if !found {
+		return ""
+	}
+	return zone
 }
 
 // proxyNamePattern — что допустимо в `ip http proxy <name>`. Как и
@@ -75,8 +105,10 @@ func validateProxy(p Proxy) error {
 	if !proxyNamePattern.MatchString(p.Name) {
 		return fmt.Errorf("invalid proxy name %q", p.Name)
 	}
-	if !hostnamePattern.MatchString(p.Domain) {
-		return fmt.Errorf("invalid domain %q", p.Domain)
+	// Зона обязательна только для `domain static`: при ndns её подставляет
+	// роутер, и слать туда своё значение нечем и незачем.
+	if !p.NDNS && !hostnamePattern.MatchString(p.Zone) {
+		return fmt.Errorf("invalid domain zone %q", p.Zone)
 	}
 	addr, err := netip.ParseAddr(p.Address)
 	if err != nil || !addr.Is4() {
@@ -151,7 +183,22 @@ func parseProxies(runningConfig string) map[string]Proxy {
 func applyProxyLine(p *Proxy, line string) bool {
 	switch line {
 	case "domain ndns":
-		p.DomainNDNS = true
+		p.NDNS, p.Zone = true, ""
+		return true
+	case "ssl redirect":
+		p.SSLRedirect = true
+		return true
+	case "x-real-ip":
+		p.XRealIP = true
+		return true
+	case "preserve-host":
+		p.PreserveHost = true
+		return true
+	case "preserve-referer":
+		p.PreserveReferer = true
+		return true
+	case "preserve-origin":
+		p.PreserveOrigin = true
 		return true
 	case "auth":
 		p.Auth, p.AuthSet = true, true
@@ -161,7 +208,7 @@ func applyProxyLine(p *Proxy, line string) bool {
 		return true
 	}
 	if m := domainStaticRe.FindStringSubmatch(line); m != nil {
-		p.Domain, p.DomainNDNS = m[1], false
+		p.Zone, p.NDNS = m[1], false
 		return true
 	}
 	if m := upstreamLine.FindStringSubmatch(line); m != nil {
@@ -202,24 +249,40 @@ func proxySatisfied(cur, want Proxy) bool {
 	if cur.AuthSet && cur.Auth != want.Auth {
 		return false
 	}
+	// Флаги сравниваем в одну сторону: нам важно, что нужное включено, а не
+	// что лишнего нет. Роутер печатает их, только когда они включены, так что
+	// «не хватает» отличимо от «не сказано», и цикла перезаписи это не даёт.
+	if want.SSLRedirect && !cur.SSLRedirect {
+		return false
+	}
+	if want.XRealIP && !cur.XRealIP {
+		return false
+	}
+	if want.PreserveHost && !cur.PreserveHost {
+		return false
+	}
+	if want.PreserveReferer && !cur.PreserveReferer {
+		return false
+	}
+	if want.PreserveOrigin && !cur.PreserveOrigin {
+		return false
+	}
 	return true
 }
 
-// domainSatisfied — отдельно, потому что `domain ndns` и `domain static` могут
-// означать один и тот же FQDN.
+// domainSatisfied — совпадает ли способ задания домена.
 //
-// Пишем мы всегда `domain static <fqdn>`: оператор знает host из Ingress и не
-// знает зону KeenDNS роутера, так что достраивать имя ему нечем. Но роутер
-// вправе схлопнуть static-домен внутри своей зоны обратно в ndns — и тогда
-// строгое сравнение объявляло бы расхождение на каждом проходе. Имя записи при
-// `domain ndns` и есть первая метка FQDN, так что совпадение по ней —
-// достаточное свидетельство, что опубликован тот же домен.
+// Сравнение строгое, в отличие от остальных полей, и это осознанно: `ndns` и
+// `static` — не два способа записать одно и то же. Только `ndns` публикует имя
+// в KeenDNS; запись со static-зоной внутри keenetic.link просто не заявляет
+// имя, и роутер отвечает на него собственным веб-интерфейсом, ничем не
+// сигналя об ошибке. Считать их взаимозаменяемыми — ровно та ошибка, которая
+// положила все опубликованные сервисы.
 func domainSatisfied(cur, want Proxy) bool {
-	if cur.DomainNDNS {
-		label, _, _ := strings.Cut(want.Domain, ".")
-		return label != "" && strings.EqualFold(label, cur.Name)
+	if want.NDNS {
+		return cur.NDNS
 	}
-	return strings.EqualFold(cur.Domain, want.Domain)
+	return !cur.NDNS && strings.EqualFold(cur.Zone, want.Zone)
 }
 
 // proxyCommands — команды, приводящие запись к желаемому виду.
@@ -229,18 +292,38 @@ func domainSatisfied(cur, want Proxy) bool {
 // узнавать приглашения вида `(config-...)>` — иначе сессия висела бы до
 // таймаута на первой же вложенной команде.
 func proxyCommands(p Proxy) []string {
-	auth := "no auth"
-	if p.Auth {
-		auth = "auth"
+	domain := "domain ndns"
+	if !p.NDNS {
+		domain = fmt.Sprintf("domain static %s", p.Zone)
 	}
-	return []string{
+
+	cmds := []string{
 		fmt.Sprintf("ip http proxy %s", p.Name),
-		fmt.Sprintf("domain static %s", p.Domain),
+		domain,
 		fmt.Sprintf("upstream %s %s %d", p.Scheme, p.Address, p.Port),
 		fmt.Sprintf("security-level %s", p.SecurityLevel),
-		auth,
-		"exit",
 	}
+	// Флаги — только включение. Выключать то, что кто-то поставил руками,
+	// оператору незачем: он владеет адресом и доменом записи, а не всей её
+	// настройкой.
+	for _, f := range []struct {
+		on  bool
+		cmd string
+	}{
+		{p.SSLRedirect, "ssl redirect"},
+		{p.XRealIP, "x-real-ip"},
+		{p.PreserveHost, "preserve-host"},
+		{p.PreserveReferer, "preserve-referer"},
+		{p.PreserveOrigin, "preserve-origin"},
+	} {
+		if f.on {
+			cmds = append(cmds, f.cmd)
+		}
+	}
+	if p.Auth {
+		cmds = append(cmds, "auth")
+	}
+	return append(cmds, "exit")
 }
 
 // EnsureProxy идемпотентно приводит публикацию к желаемому виду и сохраняет конфиг.

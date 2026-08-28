@@ -19,15 +19,19 @@ const runningConfigWithProxies = `
 ip host dev.example.keenetic.link 192.168.99.1
 ip host notes.example.keenetic.link 192.168.99.1
 ip http proxy notes
-    domain static notes.example.keenetic.link
+    domain static example.keenetic.link
     upstream http 192.168.99.44 80
+    ssl redirect
     security-level public
+    preserve-host
     no auth
 !
 ip http proxy k8s
     domain ndns
     upstream https 192.168.99.44 6443
+    ssl redirect
     security-level private
+    x-real-ip
     auth
 !
 ip dhcp pool _WEBADMIN
@@ -40,14 +44,16 @@ func TestParseProxiesReadsANestedBlock(t *testing.T) {
 
 	want := map[string]Proxy{
 		"notes": {
-			Name: "notes", Domain: "notes.example.keenetic.link",
+			Name: "notes", Zone: "example.keenetic.link",
 			Scheme: "http", Address: "192.168.99.44", Port: 80,
 			SecurityLevel: "public", Auth: false, AuthSet: true,
+			SSLRedirect: true, PreserveHost: true,
 		},
 		"k8s": {
-			Name: "k8s", DomainNDNS: true,
+			Name: "k8s", NDNS: true,
 			Scheme: "https", Address: "192.168.99.44", Port: 6443,
 			SecurityLevel: "private", Auth: true, AuthSet: true,
+			SSLRedirect: true, XRealIP: true,
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -80,7 +86,7 @@ func TestParseProxiesReadsTheFlatForm(t *testing.T) {
 
 func TestProxySatisfied(t *testing.T) {
 	want := Proxy{
-		Name: "notes", Domain: "notes.example.keenetic.link",
+		Name: "notes", NDNS: true,
 		Scheme: "http", Address: "192.168.99.44", Port: 80,
 		SecurityLevel: "public",
 	}
@@ -96,20 +102,14 @@ func TestProxySatisfied(t *testing.T) {
 			ok:   true,
 		},
 		{
-			// Роутер вправе схлопнуть static-домен своей зоны в ndns. Считать
-			// это расхождением значит переписывать конфиг (и флеш) каждые 5 минут.
-			name: "domain ndns с тем же именем",
+			// Главный случай. `domain static` и `domain ndns` — не два способа
+			// записать одно и то же: только ndns заявляет имя в KeenDNS, а
+			// static-запись внутри keenetic.link молча отдаёт имя роутеру, и он
+			// отвечает своим веб-интерфейсом. Считать их равными — та самая
+			// ошибка, которая положила все публикации.
+			name: "на роутере domain static, а нужен ndns",
 			cur: Proxy{
-				Name: "notes", DomainNDNS: true,
-				Scheme: "http", Address: "192.168.99.44", Port: 80,
-				SecurityLevel: "public",
-			},
-			ok: true,
-		},
-		{
-			name: "domain ndns, но имя записи от другого хоста",
-			cur: Proxy{
-				Name: "other", DomainNDNS: true,
+				Name: "notes", Zone: "example.keenetic.link",
 				Scheme: "http", Address: "192.168.99.44", Port: 80,
 				SecurityLevel: "public",
 			},
@@ -118,7 +118,7 @@ func TestProxySatisfied(t *testing.T) {
 		{
 			name: "другой upstream",
 			cur: Proxy{
-				Name: "notes", Domain: "notes.example.keenetic.link",
+				Name: "notes", NDNS: true,
 				Scheme: "http", Address: "192.168.99.45", Port: 80,
 				SecurityLevel: "public",
 			},
@@ -127,7 +127,7 @@ func TestProxySatisfied(t *testing.T) {
 		{
 			name: "другой порт",
 			cur: Proxy{
-				Name: "notes", Domain: "notes.example.keenetic.link",
+				Name: "notes", NDNS: true,
 				Scheme: "http", Address: "192.168.99.44", Port: 8080,
 				SecurityLevel: "public",
 			},
@@ -138,7 +138,7 @@ func TestProxySatisfied(t *testing.T) {
 			// здесь дало бы вечную перезапись.
 			name: "роутер не напечатал security-level",
 			cur: Proxy{
-				Name: "notes", Domain: "notes.example.keenetic.link",
+				Name: "notes", NDNS: true,
 				Scheme: "http", Address: "192.168.99.44", Port: 80,
 			},
 			ok: true,
@@ -146,7 +146,7 @@ func TestProxySatisfied(t *testing.T) {
 		{
 			name: "роутер напечатал другой security-level",
 			cur: Proxy{
-				Name: "notes", Domain: "notes.example.keenetic.link",
+				Name: "notes", NDNS: true,
 				Scheme: "http", Address: "192.168.99.44", Port: 80,
 				SecurityLevel: "private",
 			},
@@ -155,7 +155,7 @@ func TestProxySatisfied(t *testing.T) {
 		{
 			name: "auth включён на роутере, в spec выключен",
 			cur: Proxy{
-				Name: "notes", Domain: "notes.example.keenetic.link",
+				Name: "notes", NDNS: true,
 				Scheme: "http", Address: "192.168.99.44", Port: 80,
 				SecurityLevel: "public", Auth: true, AuthSet: true,
 			},
@@ -167,7 +167,7 @@ func TestProxySatisfied(t *testing.T) {
 			// проверяем именно, что отсутствие не считается расхождением.
 			name: "роутер про auth не написал",
 			cur: Proxy{
-				Name: "notes", Domain: "notes.example.keenetic.link",
+				Name: "notes", NDNS: true,
 				Scheme: "http", Address: "192.168.99.44", Port: 80,
 				SecurityLevel: "public",
 			},
@@ -189,17 +189,23 @@ func TestProxySatisfied(t *testing.T) {
 // ушла бы в контекст прокси.
 func TestProxyCommandsEnterAndLeaveTheContext(t *testing.T) {
 	got := proxyCommands(Proxy{
-		Name: "notes", Domain: "notes.example.keenetic.link",
+		Name: "notes", NDNS: true,
 		Scheme: "http", Address: "192.168.99.44", Port: 80,
 		SecurityLevel: "public",
+		SSLRedirect:   true, XRealIP: true,
+		PreserveHost: true, PreserveReferer: true, PreserveOrigin: true,
 	})
 
 	want := []string{
 		"ip http proxy notes",
-		"domain static notes.example.keenetic.link",
+		"domain ndns",
 		"upstream http 192.168.99.44 80",
 		"security-level public",
-		"no auth",
+		"ssl redirect",
+		"x-real-ip",
+		"preserve-host",
+		"preserve-referer",
+		"preserve-origin",
 		"exit",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -211,21 +217,21 @@ func TestProxyCommandsEnterAndLeaveTheContext(t *testing.T) {
 // это дописанная команда, а не кривое значение.
 func TestValidateProxyRejectsCommandInjection(t *testing.T) {
 	base := Proxy{
-		Name: "notes", Domain: "notes.example.keenetic.link",
+		Name: "notes", Zone: "example.keenetic.link",
 		Scheme: "http", Address: "192.168.99.44", Port: 80,
 		SecurityLevel: "public",
 	}
 
 	tests := map[string]func(*Proxy){
-		"перевод строки в имени":  func(p *Proxy) { p.Name = "notes\nno ip host x" },
-		"пробел в имени":          func(p *Proxy) { p.Name = "notes x" },
-		"перевод строки в домене": func(p *Proxy) { p.Domain = "notes.example.link\nreboot" },
-		"не IPv4 в upstream":      func(p *Proxy) { p.Address = "192.168.99.44; reboot" },
-		"порт вне диапазона":      func(p *Proxy) { p.Port = 70000 },
-		"неизвестная схема":       func(p *Proxy) { p.Scheme = "ftp" },
-		"неизвестный уровень":     func(p *Proxy) { p.SecurityLevel = "open" },
-		"пустой уровень доступа":  func(p *Proxy) { p.SecurityLevel = "" },
-		"пустое имя":              func(p *Proxy) { p.Name = "" },
+		"перевод строки в имени": func(p *Proxy) { p.Name = "notes\nno ip host x" },
+		"пробел в имени":         func(p *Proxy) { p.Name = "notes x" },
+		"перевод строки в зоне":  func(p *Proxy) { p.Zone = "example.link\nreboot" },
+		"не IPv4 в upstream":     func(p *Proxy) { p.Address = "192.168.99.44; reboot" },
+		"порт вне диапазона":     func(p *Proxy) { p.Port = 70000 },
+		"неизвестная схема":      func(p *Proxy) { p.Scheme = "ftp" },
+		"неизвестный уровень":    func(p *Proxy) { p.SecurityLevel = "open" },
+		"пустой уровень доступа": func(p *Proxy) { p.SecurityLevel = "" },
+		"пустое имя":             func(p *Proxy) { p.Name = "" },
 	}
 
 	for name, mutate := range tests {
