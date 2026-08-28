@@ -11,10 +11,12 @@ import (
 	"flag"
 	"os"
 	"strconv"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -57,6 +59,23 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         true, // одна активная реплика → конфиг роутера правит один
 		LeaderElectionID:       "keenetic-operator.whitediver.com",
+		// Дефолты client-go (15s/10s/2s) рассчитаны на быстрый API-сервер. На
+		// control-plane из одной Raspberry Pi PUT лизы иногда не укладывается в
+		// отведённое время, менеджер теряет лидерство и выходит с ошибкой —
+		// наблюдалось 19 рестартов за 8 часов, каждый со строкой
+		// `Failed to renew lease ... context deadline exceeded`. Производный
+		// таймаут одного запроса (RenewDeadline/2) при дефолтах равен пяти
+		// секундам — ровно то, что стояло в отвергнутом Put.
+		//
+		// Выход при потере лидерства — правильное поведение: держать лизу
+		// перестали, значит писать в роутер больше нельзя. Поэтому лечим не
+		// выход, а частоту. С этими значениями одиночный медленный запрос
+		// переживается, а действительно мёртвого лидера сменят примерно через
+		// минуту — для оператора, который и так переутверждает состояние раз в
+		// пять минут, эта минута не значит ничего.
+		LeaseDuration: ptr.To(60 * time.Second),
+		RenewDeadline: ptr.To(40 * time.Second),
+		RetryPeriod:   ptr.To(10 * time.Second),
 	})
 	if err != nil {
 		setupLog.Error(err, "не удалось создать manager")
