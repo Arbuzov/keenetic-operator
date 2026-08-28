@@ -133,7 +133,8 @@ var _ = Describe("KeeneticWebApp controller", func() {
 			return cond.Reason
 		}).Should(Equal("NameConflict"))
 
-		// The entry on the router keeps belonging to whoever had it first.
-		Expect(routerWebApps.proxies["clashentry"].Domain).To(Equal("clash.a.example.link"))
+		// The entry on the router keeps belonging to whoever had it first. The
+		// router stores the zone, not the FQDN — it builds <name>.<zone> itself.
+		Expect(routerWebApps.proxies["clashentry"].Zone).To(Equal("a.example.link"))
 	})
 })

@@ -167,13 +167,25 @@ func proxyFromSpec(s keeneticv1alpha1.KeeneticWebAppSpec) keenetic.Proxy {
 		level = "public"
 	}
 	return keenetic.Proxy{
-		Name:          s.Name,
-		Domain:        s.Domain,
+		Name: s.Name,
+		// Роутер ждёт в `domain static` зону, а не FQDN, и сам склеивает
+		// `<name>.<zone>`. Полный хост там превращается в
+		// notes.notes.example.keenetic.link.
+		Zone:          keenetic.ZoneOf(s.Domain),
+		NDNS:          s.NDNS,
 		Scheme:        scheme,
 		Address:       s.UpstreamAddress,
 		Port:          s.UpstreamPort,
 		SecurityLevel: level,
 		Auth:          s.Auth,
+		// Всегда включаем — так выглядят записи, заведённые через веб-интерфейс
+		// роутера. PreserveHost из них обязателен: без него upstream получает
+		// `Host: <ip>`, ingress-контроллер не находит правило и отдаёт 404.
+		SSLRedirect:     true,
+		XRealIP:         true,
+		PreserveHost:    true,
+		PreserveReferer: true,
+		PreserveOrigin:  true,
 	}
 }
 

@@ -35,6 +35,14 @@ type KeeneticWebAppSpec struct {
 	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`
 	Domain string `json:"domain"`
 
+	// NDNS — публиковать через `domain ndns`, то есть отдать роутеру собирать
+	// имя из его собственной зоны KeenDNS. Только так имя попадает в KeenDNS:
+	// запись с `domain static` внутри keenetic.link имя не заявляет, и роутер
+	// отвечает на него своим веб-интерфейсом, никак не сообщая об ошибке.
+	// Ставится, когда Domain лежит внутри KEENDNS_ZONE.
+	// +optional
+	NDNS bool `json:"ndns,omitempty"`
+
 	// UpstreamAddress — IPv4 внутреннего сервера, куда роутер проксирует.
 	// Намеренно отдельно от KeeneticHostRecord.spec.address: там адрес самого
 	// роутера (имя должно резолвиться в него, иначе прокси минуется), а здесь —

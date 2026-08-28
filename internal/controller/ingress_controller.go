@@ -68,6 +68,12 @@ type IngressReconciler struct {
 	DefaultSecurityLevel string
 	// PublishByDefault — публиковать ли Ingress, на котором нет AnnPublish.
 	PublishByDefault bool
+	// KeenDNSZone — зона KeenDNS роутера, например example.keenetic.link.
+	// Хост внутри неё публикуется через `domain ndns` — единственный способ
+	// заявить имя в KeenDNS. Пусто -> публикуем через `domain static <зона>`,
+	// что верно для собственных доменов, но для keenetic.link даст запись,
+	// которая имя не заявляет.
+	KeenDNSZone string
 }
 
 //+kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch
@@ -278,12 +284,17 @@ func (r *IngressReconciler) reconcileWebApps(ctx context.Context,
 	ing *networkingv1.Ingress, hosts map[string]struct{}) (bool, error) {
 	l := log.FromContext(ctx)
 
+	tlsByHost, err := r.hostsRequiringTLS(ctx)
+	if err != nil {
+		return false, err
+	}
+
 	// Чего хочет именно этот Ingress. Пустая карта — законное состояние:
 	// publish=false, или publish включён, но публиковать некуда.
 	mine := map[string]struct{}{}
 	if r.publishes(ctx, ing) {
 		for host := range hosts {
-			if _, ok := r.webAppSpec(ctx, ing, host); ok {
+			if _, ok := r.webAppSpec(ctx, ing, host, tlsByHost[host]); ok {
 				mine[host] = struct{}{}
 			}
 		}
@@ -291,7 +302,7 @@ func (r *IngressReconciler) reconcileWebApps(ctx context.Context,
 
 	// Чего хотят по этим хостам все Ingress'ы namespace. Как и с адресами,
 	// нужно, чтобы совладельцы одного хоста не переписывали spec друг за другом.
-	specsByHost, err := r.webAppSpecsByHost(ctx, ing.Namespace)
+	specsByHost, err := r.webAppSpecsByHost(ctx, ing.Namespace, tlsByHost)
 	if err != nil {
 		return false, err
 	}
@@ -383,8 +394,8 @@ func (r *IngressReconciler) reconcileWebApps(ctx context.Context,
 
 // webAppSpecsByHost собирает по каждому хосту namespace множество различных
 // желаемых публикаций. Один вариант — согласие, больше одного — конфликт.
-func (r *IngressReconciler) webAppSpecsByHost(ctx context.Context,
-	namespace string) (map[string][]keeneticv1alpha1.KeeneticWebAppSpec, error) {
+func (r *IngressReconciler) webAppSpecsByHost(ctx context.Context, namespace string,
+	tlsByHost map[string]bool) (map[string][]keeneticv1alpha1.KeeneticWebAppSpec, error) {
 	var list networkingv1.IngressList
 	if err := r.List(ctx, &list, client.InNamespace(namespace)); err != nil {
 		return nil, err
@@ -401,7 +412,7 @@ func (r *IngressReconciler) webAppSpecsByHost(ctx context.Context,
 				continue
 			}
 			host := strings.ToLower(rule.Host)
-			spec, ok := r.webAppSpec(ctx, ing, host)
+			spec, ok := r.webAppSpec(ctx, ing, host, tlsByHost[host])
 			if !ok {
 				continue
 			}
@@ -436,7 +447,7 @@ func (r *IngressReconciler) publishes(ctx context.Context, ing *networkingv1.Ing
 // webAppSpec — желаемая публикация одного хоста. false означает «этот хост
 // публиковать нечем или нечему»: не ошибка реконсайла, а причина пропустить.
 func (r *IngressReconciler) webAppSpec(ctx context.Context, ing *networkingv1.Ingress,
-	host string) (keeneticv1alpha1.KeeneticWebAppSpec, bool) {
+	host string, tlsRequired bool) (keeneticv1alpha1.KeeneticWebAppSpec, bool) {
 	l := log.FromContext(ctx)
 	ann := ing.Annotations
 
@@ -473,6 +484,7 @@ func (r *IngressReconciler) webAppSpec(ctx context.Context, ing *networkingv1.In
 	}
 
 	port := r.DefaultUpstreamPort
+	portSet := false
 	if v := ann[AnnUpstreamPort]; v != "" {
 		n, err := strconv.ParseInt(v, 10, 32)
 		if err != nil || n < 1 || n > 65535 {
@@ -480,18 +492,29 @@ func (r *IngressReconciler) webAppSpec(ctx context.Context, ing *networkingv1.In
 				"host", host, "annotation", AnnUpstreamPort, "value", v)
 			return keeneticv1alpha1.KeeneticWebAppSpec{}, false
 		}
-		port = int32(n)
-	}
-	if port == 0 {
-		port = 80
+		port, portSet = int32(n), true
 	}
 
 	scheme := ann[AnnUpstreamScheme]
+	if scheme == "" && tlsRequired {
+		// Хост, у которого хоть один Ingress несёт TLS, ingress-nginx по
+		// умолчанию редиректит с :80 на https. Отправить туда роутер по http
+		// значит получить 308 на имя, которое резолвится обратно в роутер, —
+		// петля редиректов, а не отказ. Именно так лёг dev.* со всем, что на
+		// нём висит.
+		scheme = "https"
+		if !portSet {
+			port = 443
+		}
+	}
 	if scheme == "" {
 		scheme = r.DefaultUpstreamScheme
 	}
 	if scheme == "" {
 		scheme = "http"
+	}
+	if port == 0 {
+		port = 80
 	}
 	if scheme != "http" && scheme != "https" {
 		l.Info("хост не публикуем: некорректная схема upstream",
@@ -524,14 +547,85 @@ func (r *IngressReconciler) webAppSpec(ctx context.Context, ing *networkingv1.In
 	}
 
 	return keeneticv1alpha1.KeeneticWebAppSpec{
-		Name:            name,
-		Domain:          host,
+		Name:   name,
+		Domain: host,
+		// Внутри зоны KeenDNS публиковать можно только через `domain ndns` —
+		// иначе запись есть, а имя не заявлено, и роутер отвечает на него
+		// собственным веб-интерфейсом.
+		NDNS:            r.inKeenDNSZone(host),
 		UpstreamAddress: address,
 		UpstreamPort:    port,
 		UpstreamScheme:  scheme,
 		SecurityLevel:   level,
 		Auth:            auth,
 	}, true
+}
+
+// inKeenDNSZone — лежит ли хост непосредственно в зоне KeenDNS роутера.
+// Именно непосредственно: `domain ndns` собирает имя как `<имя записи>.<зона>`,
+// то есть ровно одну метку сверху, и для a.b.<зона> дало бы не тот хост.
+func (r *IngressReconciler) inKeenDNSZone(host string) bool {
+	if r.KeenDNSZone == "" {
+		return false
+	}
+	return strings.EqualFold(keenetic.ZoneOf(host), r.KeenDNSZone)
+}
+
+// hostsRequiringTLS — хосты, к которым upstream обязан идти по https.
+//
+// Считается по ВСЕМ Ingress'ам кластера, а не по одному и не по namespace.
+// Хост живёт в нескольких namespace сразу (dev.* обслуживают семь Ingress'ов),
+// и TLS может нести только часть из них: у dev.* это argo-cd, grafana,
+// octoprint и prometheus, а шесть остальных идут без. Достаточно одного —
+// ingress-nginx редиректит весь хост, — а решение, посчитанное по своему
+// namespace, у разных объектов вышло бы разным, и они переписывали бы одну
+// запись роутера друг за другом.
+func (r *IngressReconciler) hostsRequiringTLS(ctx context.Context) (map[string]bool, error) {
+	var list networkingv1.IngressList
+	if err := r.List(ctx, &list); err != nil {
+		return nil, err
+	}
+	out := map[string]bool{}
+	for i := range list.Items {
+		ing := &list.Items[i]
+		for _, rule := range ing.Spec.Rules {
+			if rule.Host == "" {
+				continue
+			}
+			host := strings.ToLower(rule.Host)
+			out[host] = out[host] || ingressRequiresTLS(ing, host)
+		}
+	}
+	return out, nil
+}
+
+// ingressRequiresTLS — отвечает ли ingress-nginx по этому хосту редиректом на
+// https. Секции tls достаточно: ssl-redirect у ingress-nginx включён по
+// умолчанию именно для хостов с TLS. Явная аннотация перебивает в обе стороны.
+func ingressRequiresTLS(ing *networkingv1.Ingress, host string) bool {
+	for _, ann := range []string{
+		"nginx.ingress.kubernetes.io/force-ssl-redirect",
+		"nginx.ingress.kubernetes.io/ssl-redirect",
+	} {
+		if v, ok := ing.Annotations[ann]; ok {
+			b, err := strconv.ParseBool(v)
+			if err == nil {
+				return b
+			}
+		}
+	}
+	for _, t := range ing.Spec.TLS {
+		if len(t.Hosts) == 0 {
+			// Секция без списка хостов покрывает весь Ingress.
+			return true
+		}
+		for _, h := range t.Hosts {
+			if strings.EqualFold(h, host) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (r *IngressReconciler) SetupWithManager(mgr ctrl.Manager) error {

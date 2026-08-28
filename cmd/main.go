@@ -132,6 +132,13 @@ func main() {
 		// сервис не опубликовался» пришлось бы выяснять по исходникам.
 		setupLog.Info("DEFAULT_UPSTREAM_IP не задан — веб-приложения не публикуются, ведём только DNS-записи")
 	} else {
+		if os.Getenv("KEENDNS_ZONE") == "" {
+			// Без зоны публикации уедут как `domain static`, а такая запись имя
+			// в KeenDNS не заявляет: роутер будет отвечать на него своим
+			// веб-интерфейсом, ничем не сигналя об ошибке. Для собственного
+			// домена это законно, для keenetic.link — нет, поэтому говорим вслух.
+			setupLog.Info("KEENDNS_ZONE не задан — публикуем через `domain static`; для имён в зоне KeenDNS задайте зону, иначе роутер не заявит имя")
+		}
 		upstreamPortEnv := env("DEFAULT_UPSTREAM_PORT", "80")
 		upstreamPort, err = strconv.Atoi(upstreamPortEnv)
 		if err != nil || upstreamPort < 1 || upstreamPort > 65535 {
@@ -156,6 +163,7 @@ func main() {
 		DefaultUpstreamScheme:  env("DEFAULT_UPSTREAM_SCHEME", "http"),
 		DefaultSecurityLevel:   env("DEFAULT_SECURITY_LEVEL", "public"),
 		PublishByDefault:       publishByDefault,
+		KeenDNSZone:            os.Getenv("KEENDNS_ZONE"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "не удалось создать контроллер", "controller", "Ingress")
 		os.Exit(1)

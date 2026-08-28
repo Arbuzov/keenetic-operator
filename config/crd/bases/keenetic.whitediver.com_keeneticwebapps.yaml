@@ -88,6 +88,14 @@ spec:
                 minLength: 1
                 pattern: ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}$
                 type: string
+              ndns:
+                description: |-
+                  NDNS — публиковать через `domain ndns`, то есть отдать роутеру собирать
+                  имя из его собственной зоны KeenDNS. Только так имя попадает в KeenDNS:
+                  запись с `domain static` внутри keenetic.link имя не заявляет, и роутер
+                  отвечает на него своим веб-интерфейсом, никак не сообщая об ошибке.
+                  Ставится, когда Domain лежит внутри KEENDNS_ZONE.
+                type: boolean
               securityLevel:
                 default: public
                 description: |-
