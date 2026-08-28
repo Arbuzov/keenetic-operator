@@ -156,6 +156,45 @@ func TestReadUntilPromptReportsAMissingPrompt(t *testing.T) {
 	}
 }
 
+// `ip http proxy <name>` drops the CLI into a nested context with a prompt of
+// its own. Waiting for the top-level `(config)>` there hangs the session until
+// sessionTimeout on the very first nested command, which is how publishing a
+// web app would fail: not with a rejection, but with a stall.
+func TestReadUntilPromptAcceptsANestedContextPrompt(t *testing.T) {
+	r := &chunkReader{chunks: []string{
+		"ip http proxy notes\n",
+		"(config-proxy)> ",
+		"this must not be read: the next command has not been sent yet",
+	}}
+
+	var out strings.Builder
+	if err := readUntilPrompt(r, &out); err != nil {
+		t.Fatalf("readUntilPrompt() error = %v", err)
+	}
+	if strings.Contains(out.String(), "must not be read") {
+		t.Errorf("read past the nested prompt: %q", out.String())
+	}
+}
+
+// Broadening the prompt to sub-contexts must not broaden it to anything that
+// merely looks like one inside command output — the whole-last-line rule still
+// carries the weight.
+func TestReadUntilPromptIgnoresANestedPromptInsideOutput(t *testing.T) {
+	r := &chunkReader{chunks: []string{
+		"description entered from (config-proxy)> mode\n",
+		"more output that must still be read\n",
+		"(config)> ",
+	}}
+
+	var out strings.Builder
+	if err := readUntilPrompt(r, &out); err != nil {
+		t.Fatalf("readUntilPrompt() error = %v", err)
+	}
+	if !strings.Contains(out.String(), "must still be read") {
+		t.Errorf("stopped at a nested-prompt lookalike: %q", out.String())
+	}
+}
+
 func TestReadUntilPromptReportsEOF(t *testing.T) {
 	r := &chunkReader{chunks: []string{"no prompt here"}}
 

@@ -11,10 +11,12 @@ import (
 	"flag"
 	"os"
 	"strconv"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -57,6 +59,23 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         true, // одна активная реплика → конфиг роутера правит один
 		LeaderElectionID:       "keenetic-operator.whitediver.com",
+		// Дефолты client-go (15s/10s/2s) рассчитаны на быстрый API-сервер. На
+		// control-plane из одной Raspberry Pi PUT лизы иногда не укладывается в
+		// отведённое время, менеджер теряет лидерство и выходит с ошибкой —
+		// наблюдалось 19 рестартов за 8 часов, каждый со строкой
+		// `Failed to renew lease ... context deadline exceeded`. Производный
+		// таймаут одного запроса (RenewDeadline/2) при дефолтах равен пяти
+		// секундам — ровно то, что стояло в отвергнутом Put.
+		//
+		// Выход при потере лидерства — правильное поведение: держать лизу
+		// перестали, значит писать в роутер больше нельзя. Поэтому лечим не
+		// выход, а частоту. С этими значениями одиночный медленный запрос
+		// переживается, а действительно мёртвого лидера сменят примерно через
+		// минуту — для оператора, который и так переутверждает состояние раз в
+		// пять минут, эта минута не значит ничего.
+		LeaseDuration: ptr.To(60 * time.Second),
+		RenewDeadline: ptr.To(40 * time.Second),
+		RetryPeriod:   ptr.To(10 * time.Second),
 	})
 	if err != nil {
 		setupLog.Error(err, "не удалось создать manager")
@@ -91,10 +110,52 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := (&controller.KeeneticWebAppReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Keenetic: kc,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "не удалось создать контроллер", "controller", "KeeneticWebApp")
+		os.Exit(1)
+	}
+
+	// Настройки публикации разбираем только когда публикация включена. Иначе
+	// протухшее значение в DEFAULT_UPSTREAM_PORT не давало бы оператору
+	// стартовать в режиме «только DNS» — режиме, которому эта настройка вообще
+	// не нужна.
+	upstreamAddress := os.Getenv("DEFAULT_UPSTREAM_IP")
+	upstreamPort := 80
+	publishByDefault := true
+	if upstreamAddress == "" {
+		// Не фатально: так оператор ведёт только `ip host`, ровно как до
+		// появления публикаций. Сказать об этом вслух надо — иначе «почему
+		// сервис не опубликовался» пришлось бы выяснять по исходникам.
+		setupLog.Info("DEFAULT_UPSTREAM_IP не задан — веб-приложения не публикуются, ведём только DNS-записи")
+	} else {
+		upstreamPortEnv := env("DEFAULT_UPSTREAM_PORT", "80")
+		upstreamPort, err = strconv.Atoi(upstreamPortEnv)
+		if err != nil || upstreamPort < 1 || upstreamPort > 65535 {
+			setupLog.Error(err, "некорректный DEFAULT_UPSTREAM_PORT", "value", upstreamPortEnv)
+			os.Exit(1)
+		}
+		if v := os.Getenv("PUBLISH_BY_DEFAULT"); v != "" {
+			publishByDefault, err = strconv.ParseBool(v)
+			if err != nil {
+				setupLog.Error(err, "некорректный PUBLISH_BY_DEFAULT", "value", v)
+				os.Exit(1)
+			}
+		}
+	}
+
 	if err := (&controller.IngressReconciler{
-		Client:         mgr.GetClient(),
-		Scheme:         mgr.GetScheme(),
-		DefaultAddress: os.Getenv("DEFAULT_INGRESS_IP"),
+		Client:                 mgr.GetClient(),
+		Scheme:                 mgr.GetScheme(),
+		DefaultAddress:         os.Getenv("DEFAULT_INGRESS_IP"),
+		DefaultUpstreamAddress: upstreamAddress,
+		DefaultUpstreamPort:    int32(upstreamPort),
+		DefaultUpstreamScheme:  env("DEFAULT_UPSTREAM_SCHEME", "http"),
+		DefaultSecurityLevel:   env("DEFAULT_SECURITY_LEVEL", "public"),
+		PublishByDefault:       publishByDefault,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "не удалось создать контроллер", "controller", "Ingress")
 		os.Exit(1)

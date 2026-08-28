@@ -186,8 +186,14 @@ func (c *Client) run(ctx context.Context, lines ...string) (string, error) {
 	return filterNoise(out.String()), nil
 }
 
-// cliPrompt — приглашение Keenetic CLI.
-const cliPrompt = "(config)>"
+// cliPromptPattern — приглашение любого уровня. Команды вида `ip http proxy
+// <name>` уводят CLI во вложенный контекст, и приглашение там своё —
+// `(config-proxy)>`. Ждать в нём ровно `(config)>` значит повиснуть до
+// sessionTimeout на первой же вложенной команде, поэтому узнаём и такие.
+// Конкретный суффикс не перечисляем: контекстов у роутера много, а ошибиться
+// в сторону «не узнал приглашение» дороже, чем в сторону лишнего совпадения —
+// строку целиком мы всё равно сверяем (см. atPrompt).
+var cliPromptPattern = regexp.MustCompile(`^\(config(-[a-zA-Z0-9_-]+)?\)>$`)
 
 // ansiEscape — управляющие последовательности, которыми роутер перемежает вывод
 // (в основном ESC[K при отрисовке эха).
@@ -210,7 +216,7 @@ func atPrompt(window string) bool {
 	if i := strings.LastIndexAny(clean, "\r\n"); i >= 0 {
 		clean = clean[i+1:]
 	}
-	return clean == cliPrompt
+	return cliPromptPattern.MatchString(clean)
 }
 
 // sessionTimeout — потолок на всю сессию: логин, все команды и ответы.

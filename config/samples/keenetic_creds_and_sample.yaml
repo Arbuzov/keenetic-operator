@@ -10,7 +10,14 @@ stringData:
   KEENETIC_USER: "<ssh-user>"
   KEENETIC_PASSWORD: "<ssh-password>"
   # KEENETIC_HOST_KEY: "SHA256:..."       # опционально: пин SSH host key роутера
-  DEFAULT_INGRESS_IP: "192.168.99.x"     # адрес твоего nginx LB (fallback к status.loadBalancer)
+  DEFAULT_INGRESS_IP: "192.168.99.x"     # в какой адрес резолвить имена (обычно сам роутер)
+  # --- публикация веб-приложений наружу (ip http proxy) ---
+  # Пусто -> публикации выключены, оператор ведёт только DNS-записи.
+  DEFAULT_UPSTREAM_IP: "192.168.99.44"   # адрес ingress-контроллера ЗА роутером
+  # DEFAULT_UPSTREAM_PORT: "80"
+  # DEFAULT_UPSTREAM_SCHEME: "http"
+  # DEFAULT_SECURITY_LEVEL: "public"     # public = «свободный доступ» из интернета
+  # PUBLISH_BY_DEFAULT: "true"           # false -> публиковать только по аннотации
 ---
 # --- Ручная запись для не-Ingress хоста (показывает, что CRD самоценен). ---
 apiVersion: keenetic.whitediver.com/v1alpha1
@@ -21,3 +28,20 @@ metadata:
 spec:
   hostname: nas.whitediver.keenetic.link
   address: 192.168.99.44
+---
+# --- Ручная публикация: тот же NAS, но открытый снаружи через KeenDNS. ---
+# Адреса у двух объектов разные, и это не опечатка: имя обязано резолвиться в
+# роутер (запись выше), иначе трафик пойдёт мимо прокси и мимо TLS KeenDNS, а
+# проксирует роутер уже на реальный адрес приложения (upstreamAddress).
+apiVersion: keenetic.whitediver.com/v1alpha1
+kind: KeeneticWebApp
+metadata:
+  name: nas.whitediver.keenetic.link
+  namespace: default
+spec:
+  name: nas                              # `ip http proxy nas` на роутере
+  domain: nas.whitediver.keenetic.link
+  upstreamAddress: 192.168.99.44
+  upstreamPort: 80
+  upstreamScheme: http
+  securityLevel: public

@@ -26,14 +26,16 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	keeneticv1alpha1 "github.com/Arbuzov/keenetic-operator/api/v1alpha1"
+	"github.com/Arbuzov/keenetic-operator/internal/keenetic"
 )
 
 var (
-	cfg       *rest.Config
-	k8sClient client.Client
-	testEnv   *envtest.Environment
-	ctx       context.Context
-	cancel    context.CancelFunc
+	cfg           *rest.Config
+	k8sClient     client.Client
+	testEnv       *envtest.Environment
+	ctx           context.Context
+	cancel        context.CancelFunc
+	routerWebApps *fakeWebApps
 )
 
 func TestControllers(t *testing.T) {
@@ -82,9 +84,26 @@ var _ = BeforeSuite(func() {
 		MaxHosts: 64,
 	}).SetupWithManager(mgr)).To(Succeed())
 
+	// Держим ссылку в пакетной переменной: спеки проверяют не только объекты в
+	// API, но и то, что реально доехало до «роутера» — без этого не отличить
+	// «запись не тронули» от «запись снесли и завели заново».
+	routerWebApps = newFakeWebApps()
+	Expect((&KeeneticWebAppReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Keenetic: routerWebApps,
+	}).SetupWithManager(mgr)).To(Succeed())
+
 	Expect((&IngressReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		// Публикация включена: без DefaultUpstreamAddress вся ветка web app
+		// молча выключена, и специи по ней проходили бы, ничего не проверяя.
+		DefaultUpstreamAddress: "192.168.99.44",
+		DefaultUpstreamPort:    80,
+		DefaultUpstreamScheme:  "http",
+		DefaultSecurityLevel:   "public",
+		PublishByDefault:       true,
 	}).SetupWithManager(mgr)).To(Succeed())
 
 	go func() {
@@ -123,4 +142,28 @@ func (f *fakeKeenetic) HasHost(_ context.Context, host, ip string) (bool, error)
 
 func (f *fakeKeenetic) CountHosts(_ context.Context) (int, error) {
 	return len(f.hosts), nil
+}
+
+// fakeWebApps — in-memory stand-in for the router's `ip http proxy` table,
+// keyed by entry name (which is how the router keys it too).
+type fakeWebApps struct {
+	proxies map[string]keenetic.Proxy
+}
+
+func newFakeWebApps() *fakeWebApps {
+	return &fakeWebApps{proxies: map[string]keenetic.Proxy{}}
+}
+
+func (f *fakeWebApps) EnsureProxy(_ context.Context, p keenetic.Proxy) error {
+	f.proxies[p.Name] = p
+	return nil
+}
+
+func (f *fakeWebApps) DeleteProxy(_ context.Context, name string) error {
+	delete(f.proxies, name)
+	return nil
+}
+
+func (f *fakeWebApps) CountProxies(_ context.Context) (int, error) {
+	return len(f.proxies), nil
 }
