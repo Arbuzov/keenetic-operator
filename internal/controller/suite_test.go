@@ -26,6 +26,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	keeneticv1alpha1 "github.com/Arbuzov/keenetic-operator/api/v1alpha1"
+	"github.com/Arbuzov/keenetic-operator/internal/keenetic"
 )
 
 var (
@@ -82,9 +83,22 @@ var _ = BeforeSuite(func() {
 		MaxHosts: 64,
 	}).SetupWithManager(mgr)).To(Succeed())
 
+	Expect((&KeeneticWebAppReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Keenetic: newFakeWebApps(),
+	}).SetupWithManager(mgr)).To(Succeed())
+
 	Expect((&IngressReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		// Публикация включена: без DefaultUpstreamAddress вся ветка web app
+		// молча выключена, и специи по ней проходили бы, ничего не проверяя.
+		DefaultUpstreamAddress: "192.168.99.44",
+		DefaultUpstreamPort:    80,
+		DefaultUpstreamScheme:  "http",
+		DefaultSecurityLevel:   "public",
+		PublishByDefault:       true,
 	}).SetupWithManager(mgr)).To(Succeed())
 
 	go func() {
@@ -123,4 +137,24 @@ func (f *fakeKeenetic) HasHost(_ context.Context, host, ip string) (bool, error)
 
 func (f *fakeKeenetic) CountHosts(_ context.Context) (int, error) {
 	return len(f.hosts), nil
+}
+
+// fakeWebApps — in-memory stand-in for the router's `ip http proxy` table,
+// keyed by entry name (which is how the router keys it too).
+type fakeWebApps struct {
+	proxies map[string]keenetic.Proxy
+}
+
+func newFakeWebApps() *fakeWebApps {
+	return &fakeWebApps{proxies: map[string]keenetic.Proxy{}}
+}
+
+func (f *fakeWebApps) EnsureProxy(_ context.Context, p keenetic.Proxy) error {
+	f.proxies[p.Name] = p
+	return nil
+}
+
+func (f *fakeWebApps) DeleteProxy(_ context.Context, name string) error {
+	delete(f.proxies, name)
+	return nil
 }

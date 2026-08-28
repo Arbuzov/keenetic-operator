@@ -10,6 +10,7 @@ package controller
 import (
 	"context"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,20 +25,53 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	keeneticv1alpha1 "github.com/Arbuzov/keenetic-operator/api/v1alpha1"
+	"github.com/Arbuzov/keenetic-operator/internal/keenetic"
 	"github.com/Arbuzov/keenetic-operator/internal/metrics"
 )
 
-// IngressReconciler превращает хосты Ingress в дочерние KeeneticHostRecord.
+// Аннотации на Ingress, которыми настраивается публикация хоста наружу
+// (`ip http proxy` на роутере). Всё, кроме publish, имеет разумный дефолт из
+// env, так что типичному Ingress'у аннотации не нужны вовсе.
+const (
+	// AnnPublish — "false" отключает публикацию этого Ingress'а.
+	AnnPublish = "keenetic.whitediver.com/publish"
+	// AnnUpstream — куда роутер проксирует. Это адрес ingress-контроллера, а НЕ
+	// тот адрес, в который резолвится имя: имя обязано резолвиться в роутер,
+	// иначе прокси минуется и TLS-сертификат KeenDNS не применяется.
+	AnnUpstream       = "keenetic.whitediver.com/upstream"
+	AnnUpstreamPort   = "keenetic.whitediver.com/upstream-port"
+	AnnUpstreamScheme = "keenetic.whitediver.com/upstream-scheme"
+	AnnSecurityLevel  = "keenetic.whitediver.com/security-level"
+	AnnAuth           = "keenetic.whitediver.com/auth"
+	// AnnProxyName — имя записи в конфиге роутера. По умолчанию первая метка
+	// хоста (notes для notes.example.keenetic.link).
+	AnnProxyName = "keenetic.whitediver.com/proxy-name"
+)
+
+// IngressReconciler превращает хосты Ingress в дочерние KeeneticHostRecord
+// (статический DNS) и KeeneticWebApp (публикация наружу).
 type IngressReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 	// DefaultAddress — адрес, когда у Ingress нет LB-IP в status
 	// (один общий nginx LB). Берётся из env DEFAULT_INGRESS_IP.
 	DefaultAddress string
+
+	// DefaultUpstream* — куда публикуемые хосты проксируются по умолчанию.
+	// Пустой DefaultUpstreamAddress означает «публиковать нечем»: без него
+	// оператор ведёт только DNS-записи, как и до появления публикаций.
+	DefaultUpstreamAddress string
+	DefaultUpstreamPort    int32
+	DefaultUpstreamScheme  string
+	// DefaultSecurityLevel — public | private для хостов без аннотации.
+	DefaultSecurityLevel string
+	// PublishByDefault — публиковать ли Ingress, на котором нет AnnPublish.
+	PublishByDefault bool
 }
 
 //+kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch
 //+kubebuilder:rbac:groups=keenetic.whitediver.com,resources=keenetichostrecords,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=keenetic.whitediver.com,resources=keeneticwebapps,verbs=get;list;watch;create;update;patch;delete
 
 func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	l := log.FromContext(ctx)
@@ -180,7 +214,17 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	if deferred {
+	// --- публикации наружу (`ip http proxy`) ---
+	// Отдельным проходом, а не внутри цикла выше: DNS-запись и публикация —
+	// разные объекты роутера с разными условиями применимости. Хост, который
+	// не публикуется, обязан всё равно получить запись `ip host`, иначе он
+	// перестанет резолвиться внутри сети.
+	webDeferred, err := r.reconcileWebApps(ctx, &ing, desired)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if deferred || webDeferred {
 		// Пока конфликт не разрешён, разбудить нас некому: чужой Ingress мы не
 		// watch'им, а записи, через которую прилетело бы событие, может и не
 		// быть. Возвращаемся сами, иначе исправленный конфликт ждал бы ресинка.
@@ -226,11 +270,266 @@ func (r *IngressReconciler) addressFor(ing *networkingv1.Ingress) string {
 	return r.DefaultAddress
 }
 
+// reconcileWebApps приводит публикации хостов этого Ingress'а в соответствие
+// с его аннотациями. Возвращает true, если что-то отложено до разрешения
+// конфликта между Ingress'ами.
+func (r *IngressReconciler) reconcileWebApps(ctx context.Context,
+	ing *networkingv1.Ingress, hosts map[string]struct{}) (bool, error) {
+	l := log.FromContext(ctx)
+
+	// Чего хочет именно этот Ingress. Пустая карта — законное состояние:
+	// publish=false, или publish включён, но публиковать некуда.
+	mine := map[string]struct{}{}
+	if r.publishes(ctx, ing) {
+		for host := range hosts {
+			if _, ok := r.webAppSpec(ctx, ing, host); ok {
+				mine[host] = struct{}{}
+			}
+		}
+	}
+
+	// Чего хотят по этим хостам все Ingress'ы namespace. Как и с адресами,
+	// нужно, чтобы совладельцы одного хоста не переписывали spec друг за другом.
+	specsByHost, err := r.webAppSpecsByHost(ctx, ing.Namespace)
+	if err != nil {
+		return false, err
+	}
+
+	var deferred bool
+	for host := range mine {
+		agreed := specsByHost[host]
+		app := &keeneticv1alpha1.KeeneticWebApp{
+			ObjectMeta: metav1.ObjectMeta{Name: host, Namespace: ing.Namespace},
+		}
+
+		if len(agreed) != 1 {
+			// Разошлись. Победителя не выбираем по той же причине, что и с
+			// адресами: с MatchEveryOwner перезапись spec будит всех владельцев,
+			// и цикл переписываний упирался бы в роутер, то есть во флеш.
+			// Опаснее, чем с адресом: пока конфликт не разрешён, публикация
+			// живёт с прежними настройками — например, остаётся public после
+			// того, как её в Ingress понизили до private.
+			metrics.WebAppsConflict.Inc()
+			deferred = true
+
+			// Владение всё равно оформляем: иначе уход другого Ingress'а унесёт
+			// публикацию как последнюю ссылку вместе с хостом, который мы
+			// по-прежнему заявляем.
+			err := r.Get(ctx, client.ObjectKeyFromObject(app), app)
+			if apierrors.IsNotFound(err) {
+				l.Info("публикация пропущена, записи ещё нет",
+					"host", host, "reason", "Ingress'ы заявляют разные настройки")
+				continue
+			}
+			if err != nil {
+				return false, err
+			}
+			l.Info("настройки публикации не трогаем, владение оформляем", "host", host)
+		}
+
+		op, err := controllerutil.CreateOrUpdate(ctx, r.Client, app, func() error {
+			if len(agreed) == 1 {
+				app.Spec = agreed[0]
+			}
+			return controllerutil.SetOwnerReference(ing, app, r.Scheme)
+		})
+		if err != nil {
+			return false, err
+		}
+		if op != controllerutil.OperationResultNone {
+			l.Info("сверили публикацию", "name", host, "op", op)
+		}
+	}
+
+	// снимаем свою ссылку с публикаций, которые этот Ingress больше не хочет
+	var owned keeneticv1alpha1.KeeneticWebAppList
+	if err := r.List(ctx, &owned, client.InNamespace(ing.Namespace)); err != nil {
+		return false, err
+	}
+	for i := range owned.Items {
+		app := &owned.Items[i]
+		if _, keep := mine[app.Name]; keep {
+			continue
+		}
+		ours, err := controllerutil.HasOwnerReference(app.OwnerReferences, ing, r.Scheme)
+		if err != nil {
+			return false, err
+		}
+		if !ours {
+			continue
+		}
+		if err := controllerutil.RemoveOwnerReference(ing, app, r.Scheme); err != nil {
+			return false, err
+		}
+		if len(app.OwnerReferences) > 0 {
+			// публикация всё ещё нужна другим Ingress'ам — только снимаем свою
+			// ссылку. NotFound глотаем: объект мог уйти между List и Update.
+			if err := r.Update(ctx, app); err != nil && !apierrors.IsNotFound(err) {
+				return false, err
+			}
+			continue
+		}
+		// ушёл последний владелец. Удаляем сами, не дожидаясь GC: под envtest
+		// он не работает вовсе, а в кластере иначе остался бы зазор, в котором
+		// роутер продолжает пускать трафик снаружи на снятое приложение.
+		if err := r.Delete(ctx, app); err != nil && !apierrors.IsNotFound(err) {
+			return false, err
+		}
+	}
+
+	return deferred, nil
+}
+
+// webAppSpecsByHost собирает по каждому хосту namespace множество различных
+// желаемых публикаций. Один вариант — согласие, больше одного — конфликт.
+func (r *IngressReconciler) webAppSpecsByHost(ctx context.Context,
+	namespace string) (map[string][]keeneticv1alpha1.KeeneticWebAppSpec, error) {
+	var list networkingv1.IngressList
+	if err := r.List(ctx, &list, client.InNamespace(namespace)); err != nil {
+		return nil, err
+	}
+
+	byHost := map[string][]keeneticv1alpha1.KeeneticWebAppSpec{}
+	for i := range list.Items {
+		ing := &list.Items[i]
+		if !r.publishes(ctx, ing) {
+			continue
+		}
+		for _, rule := range ing.Spec.Rules {
+			if rule.Host == "" {
+				continue
+			}
+			host := strings.ToLower(rule.Host)
+			spec, ok := r.webAppSpec(ctx, ing, host)
+			if !ok {
+				continue
+			}
+			if !slices.Contains(byHost[host], spec) {
+				byHost[host] = append(byHost[host], spec)
+			}
+		}
+	}
+	return byHost, nil
+}
+
+// publishes — просит ли этот Ingress публиковать свои хосты наружу.
+//
+// Невнятное значение аннотации трактуется как «не публиковать», а не как
+// дефолт: аннотацию ставят, чтобы управлять публикацией, и опечатка в ней при
+// publish-by-default молча выставила бы сервис в интернет. Кто хочет дефолт —
+// не пишет аннотацию вовсе.
+func (r *IngressReconciler) publishes(ctx context.Context, ing *networkingv1.Ingress) bool {
+	v, ok := ing.Annotations[AnnPublish]
+	if !ok || v == "" {
+		return r.PublishByDefault
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		log.FromContext(ctx).Info("не разобрал аннотацию публикации, хосты не публикуем",
+			"ingress", ing.Name, "annotation", AnnPublish, "value", v)
+		return false
+	}
+	return b
+}
+
+// webAppSpec — желаемая публикация одного хоста. false означает «этот хост
+// публиковать нечем или нечему»: не ошибка реконсайла, а причина пропустить.
+func (r *IngressReconciler) webAppSpec(ctx context.Context, ing *networkingv1.Ingress,
+	host string) (keeneticv1alpha1.KeeneticWebAppSpec, bool) {
+	l := log.FromContext(ctx)
+	ann := ing.Annotations
+
+	name := ann[AnnProxyName]
+	if name == "" {
+		// Первая метка FQDN: так же, как имя записи выбирает сам роутер в
+		// режиме `domain ndns`, и так же выглядит в его веб-интерфейсе.
+		name, _, _ = strings.Cut(host, ".")
+	}
+	if !keenetic.ValidProxyName(name) {
+		l.Info("хост не публикуем: имя записи не годится для роутера",
+			"host", host, "name", name, "hint", AnnProxyName)
+		return keeneticv1alpha1.KeeneticWebAppSpec{}, false
+	}
+
+	address := ann[AnnUpstream]
+	if address == "" {
+		address = r.DefaultUpstreamAddress
+	}
+	if address == "" {
+		// Не ошибка: без DEFAULT_UPSTREAM_IP оператор просто работает как
+		// раньше — ведёт DNS-записи и ничего не публикует.
+		l.V(1).Info("хост не публикуем: не задан upstream", "host", host, "hint", AnnUpstream)
+		return keeneticv1alpha1.KeeneticWebAppSpec{}, false
+	}
+
+	port := r.DefaultUpstreamPort
+	if v := ann[AnnUpstreamPort]; v != "" {
+		n, err := strconv.ParseInt(v, 10, 32)
+		if err != nil || n < 1 || n > 65535 {
+			l.Info("хост не публикуем: некорректный порт upstream",
+				"host", host, "annotation", AnnUpstreamPort, "value", v)
+			return keeneticv1alpha1.KeeneticWebAppSpec{}, false
+		}
+		port = int32(n)
+	}
+	if port == 0 {
+		port = 80
+	}
+
+	scheme := ann[AnnUpstreamScheme]
+	if scheme == "" {
+		scheme = r.DefaultUpstreamScheme
+	}
+	if scheme == "" {
+		scheme = "http"
+	}
+	if scheme != "http" && scheme != "https" {
+		l.Info("хост не публикуем: некорректная схема upstream",
+			"host", host, "annotation", AnnUpstreamScheme, "value", scheme)
+		return keeneticv1alpha1.KeeneticWebAppSpec{}, false
+	}
+
+	level := ann[AnnSecurityLevel]
+	if level == "" {
+		level = r.DefaultSecurityLevel
+	}
+	if level == "" {
+		level = "public"
+	}
+	if level != "public" && level != "private" {
+		l.Info("хост не публикуем: некорректный уровень доступа",
+			"host", host, "annotation", AnnSecurityLevel, "value", level)
+		return keeneticv1alpha1.KeeneticWebAppSpec{}, false
+	}
+
+	auth := false
+	if v := ann[AnnAuth]; v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			l.Info("хост не публикуем: некорректное значение auth",
+				"host", host, "annotation", AnnAuth, "value", v)
+			return keeneticv1alpha1.KeeneticWebAppSpec{}, false
+		}
+		auth = b
+	}
+
+	return keeneticv1alpha1.KeeneticWebAppSpec{
+		Name:            name,
+		Domain:          host,
+		UpstreamAddress: address,
+		UpstreamPort:    port,
+		UpstreamScheme:  scheme,
+		SecurityLevel:   level,
+		Auth:            auth,
+	}, true
+}
+
 func (r *IngressReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&networkingv1.Ingress{}).
 		// MatchEveryOwner обязателен: без него Owns будит только
 		// controller-владельца, а их у нас больше нет — только обычные.
 		Owns(&keeneticv1alpha1.KeeneticHostRecord{}, builder.MatchEveryOwner).
+		Owns(&keeneticv1alpha1.KeeneticWebApp{}, builder.MatchEveryOwner).
 		Complete(r)
 }

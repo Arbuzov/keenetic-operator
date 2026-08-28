@@ -8,6 +8,7 @@ rules:
   - keenetic.whitediver.com
   resources:
   - keenetichostrecords
+  - keeneticwebapps
   verbs:
   - create
   - delete
@@ -20,12 +21,14 @@ rules:
   - keenetic.whitediver.com
   resources:
   - keenetichostrecords/finalizers
+  - keeneticwebapps/finalizers
   verbs:
   - update
 - apiGroups:
   - keenetic.whitediver.com
   resources:
   - keenetichostrecords/status
+  - keeneticwebapps/status
   verbs:
   - get
   - patch

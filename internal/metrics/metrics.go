@@ -30,6 +30,12 @@ const (
 	OpDelete = "delete"
 	OpHas    = "has"
 	OpCount  = "count"
+	// Публикации веб-приложений (`ip http proxy`) ходят к роутеру теми же
+	// сессиями, но это другой объект конфига: смешивать их с `ip host` под
+	// одним лейблом значит потерять возможность понять, что именно отвалилось.
+	OpEnsureProxy = "ensure-proxy"
+	OpDeleteProxy = "delete-proxy"
+	OpGetProxy    = "get-proxy"
 )
 
 var (
@@ -46,6 +52,15 @@ var (
 	RouterHostsLimit = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "keenetic_router_hosts_limit",
 		Help: "Configured cap on `ip host` entries (KEENETIC_MAX_HOSTS).",
+	})
+
+	// RouterWebApps — сколько записей `ip http proxy` сейчас на роутере.
+	// Лимита на них оператор не знает (в отличие от 64 записей `ip host`),
+	// так что это чистое наблюдение: рост без причины виден, а порог задаётся
+	// уже в алерте, а не в коде.
+	RouterWebApps = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "keenetic_router_web_apps",
+		Help: "Number of `ip http proxy` entries currently present on the router.",
 	})
 
 	// RouterOperations — исходы обращений к роутеру. Единственный способ
@@ -92,6 +107,18 @@ var (
 		Name: "keenetic_host_records_address_conflict_total",
 		Help: "Hosts the operator stopped maintaining because Ingresses sharing them report different addresses.",
 	})
+
+	// WebAppsConflict — хосты, для которых Ingress'ы одного namespace заявили
+	// разную публикацию (upstream, порт, уровень доступа). Тот же класс тихого
+	// отказа, что и HostRecordsAddressConflict: путь возвращает nil-ошибку, в
+	// reconcile_errors_total его не видно, а последствие хуже — уже созданная
+	// публикация продолжает пускать трафик по доконфликтным настройкам, то есть
+	// уровень доступа может остаться public после того, как его в Ingress
+	// понизили. Выбирать победителя оператор не будет: чинится это в Ingress'ах.
+	WebAppsConflict = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "keenetic_web_apps_conflict_total",
+		Help: "Hosts the operator stopped publishing because Ingresses sharing them request different settings.",
+	})
 )
 
 func init() {
@@ -100,10 +127,12 @@ func init() {
 	ctrlmetrics.Registry.MustRegister(
 		RouterHosts,
 		RouterHostsLimit,
+		RouterWebApps,
 		RouterOperations,
 		RouterOperationDuration,
 		HostRecordsLimitRejected,
 		HostRecordsAddressConflict,
+		WebAppsConflict,
 	)
 }
 

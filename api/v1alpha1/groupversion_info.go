@@ -31,6 +31,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(SchemeGroupVersion,
 		&KeeneticHostRecord{},
 		&KeeneticHostRecordList{},
+		&KeeneticWebApp{},
+		&KeeneticWebAppList{},
 	)
 	// Без этого API-сервер не знает, что CreateOptions/GetOptions/... валидны
 	// для этой group-version — ловится только вживую (envtest падал с
