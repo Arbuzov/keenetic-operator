@@ -3,7 +3,7 @@ module github.com/Arbuzov/keenetic-operator
 go 1.26.0
 
 require (
-	github.com/onsi/ginkgo/v2 v2.32.2
+	github.com/onsi/ginkgo/v2 v2.33.0
 	github.com/onsi/gomega v1.43.1
 	github.com/prometheus/client_golang v1.24.1
 	golang.org/x/crypto v0.57.0
