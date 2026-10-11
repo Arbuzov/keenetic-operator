@@ -11,6 +11,7 @@ import (
 	"flag"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -82,16 +83,28 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Зону нормализуем один раз и отдаём обоим — классификатору публикаций и
+	// проверке перед роутером. Абсолютное имя с точкой на конце иначе не совпало
+	// бы ни там, ни там, и `domain static` проскочил бы мимо обоих.
+	keenDNSZone := strings.TrimSuffix(strings.TrimSpace(os.Getenv("KEENDNS_ZONE")), ".")
+
 	// SSH-клиент Keenetic — креды из Secret через env
 	kc := &keenetic.Client{
 		Host:               env("KEENETIC_HOST", "192.168.99.1:22"),
 		User:               os.Getenv("KEENETIC_USER"),
 		Password:           os.Getenv("KEENETIC_PASSWORD"),
 		HostKeyFingerprint: os.Getenv("KEENETIC_HOST_KEY"),
-		KeenDNSZone:        os.Getenv("KEENDNS_ZONE"),
+		KeenDNSZone:        keenDNSZone,
 	}
 	if kc.HostKeyFingerprint == "" {
 		setupLog.Info("KEENETIC_HOST_KEY не задан — проверка SSH host key роутера отключена (ок для LAN, для прода задайте фингерпринт)")
+	}
+	if keenDNSZone == "" {
+		// Говорим всегда, а не только при DEFAULT_UPSTREAM_IP: публикацию
+		// включает и аннотация upstream на самом Ingress. Без зоны такие записи
+		// уедут как `domain static`, имя в KeenDNS не заявят, и проверять их
+		// перед роутером будет не с чем.
+		setupLog.Info("KEENDNS_ZONE не задан — публикации пойдут через `domain static` без проверки зоны; для имён в зоне KeenDNS задайте её, иначе роутер не заявит имя")
 	}
 
 	maxHostsEnv := env("KEENETIC_MAX_HOSTS", "64")
@@ -133,13 +146,6 @@ func main() {
 		// сервис не опубликовался» пришлось бы выяснять по исходникам.
 		setupLog.Info("DEFAULT_UPSTREAM_IP не задан — веб-приложения не публикуются, ведём только DNS-записи")
 	} else {
-		if os.Getenv("KEENDNS_ZONE") == "" {
-			// Без зоны публикации уедут как `domain static`, а такая запись имя
-			// в KeenDNS не заявляет: роутер будет отвечать на него своим
-			// веб-интерфейсом, ничем не сигналя об ошибке. Для собственного
-			// домена это законно, для keenetic.link — нет, поэтому говорим вслух.
-			setupLog.Info("KEENDNS_ZONE не задан — публикуем через `domain static`; для имён в зоне KeenDNS задайте зону, иначе роутер не заявит имя")
-		}
 		upstreamPortEnv := env("DEFAULT_UPSTREAM_PORT", "80")
 		upstreamPort, err = strconv.Atoi(upstreamPortEnv)
 		if err != nil || upstreamPort < 1 || upstreamPort > 65535 {
@@ -164,7 +170,7 @@ func main() {
 		DefaultUpstreamScheme:  env("DEFAULT_UPSTREAM_SCHEME", "http"),
 		DefaultSecurityLevel:   env("DEFAULT_SECURITY_LEVEL", "public"),
 		PublishByDefault:       publishByDefault,
-		KeenDNSZone:            os.Getenv("KEENDNS_ZONE"),
+		KeenDNSZone:            keenDNSZone,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "не удалось создать контроллер", "controller", "Ingress")
 		os.Exit(1)

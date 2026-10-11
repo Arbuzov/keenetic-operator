@@ -254,8 +254,8 @@ func TestValidateProxyRejectsCommandInjection(t *testing.T) {
 // команда неотличима от применённой, и CR уходил бы в Ready на пустом месте.
 // `domain static` с собственной зоной KeenDNS — ровно то, что выходило, когда
 // устаревшая CRD молча съедала spec.ndns. Отказ обязан случиться до роутера.
-// Остальные строки пропускаются дальше и падают уже на SSH к пустому Host —
-// этим «не пустили» и отличается от «пустили».
+// Остальные строки обязаны дойти до SSH и упасть на dial к пустому Host: тихий
+// nil без похода к роутеру иначе тоже сошёл бы за «пропустили».
 func TestEnsureProxyRefusesStaticInsideKeenDNSZone(t *testing.T) {
 	base := Proxy{Name: "notes", Scheme: "https", Address: "192.168.99.44", Port: 443, SecurityLevel: "public"}
 	for _, tt := range []struct {
@@ -274,8 +274,12 @@ func TestEnsureProxyRefusesStaticInsideKeenDNSZone(t *testing.T) {
 			p := base
 			p.NDNS, p.Zone = tt.ndns, tt.zone
 			err := (&Client{KeenDNSZone: tt.clientZone}).EnsureProxy(context.Background(), p)
-			if got := err != nil && strings.Contains(err.Error(), "refusing"); got != tt.refused {
-				t.Errorf("EnsureProxy() = %v, refused = %v, want %v", err, got, tt.refused)
+			want := "dial"
+			if tt.refused {
+				want = "refusing"
+			}
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("EnsureProxy() = %v, want an error containing %q", err, want)
 			}
 		})
 	}
