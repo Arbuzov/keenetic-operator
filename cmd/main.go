@@ -88,6 +88,7 @@ func main() {
 		User:               os.Getenv("KEENETIC_USER"),
 		Password:           os.Getenv("KEENETIC_PASSWORD"),
 		HostKeyFingerprint: os.Getenv("KEENETIC_HOST_KEY"),
+		KeenDNSZone:        os.Getenv("KEENDNS_ZONE"),
 	}
 	if kc.HostKeyFingerprint == "" {
 		setupLog.Info("KEENETIC_HOST_KEY не задан — проверка SSH host key роутера отключена (ок для LAN, для прода задайте фингерпринт)")

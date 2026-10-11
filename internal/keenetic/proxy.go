@@ -331,6 +331,17 @@ func (c *Client) EnsureProxy(ctx context.Context, p Proxy) (err error) {
 	if err = validateProxy(p); err != nil {
 		return err
 	}
+	// `domain static` с собственной зоной KeenDNS правильным не бывает: имя такая
+	// запись не заявляет, зато отвечает за голую зону — так весь
+	// whitediver.keenetic.link однажды уехал в ingress-nginx, а lockout-policy
+	// роутера заодно положила его веб-панель. Доезжает это сюда, когда spec.ndns
+	// потерян по дороге: CRD в кластере старше поля, и API-сервер молча его
+	// выкидывает. Проверяем здесь, у самой записи, — какой бы путь ни привёл.
+	if !p.NDNS && c.KeenDNSZone != "" && strings.EqualFold(p.Zone, c.KeenDNSZone) {
+		return fmt.Errorf("refusing `domain static %s` for proxy %q: it is the router's own KeenDNS zone, "+
+			"where only `domain ndns` publishes; if the Ingress controller sets spec.ndns, "+
+			"the KeeneticWebApp CRD in the cluster predates the field", p.Zone, p.Name)
+	}
 	// Счётчик заводим только после валидации: кривой spec до роутера не доходит,
 	// и алерт на «роутер недоступен» не должен на нём загораться.
 	defer metrics.ObserveRouterOp(metrics.OpEnsureProxy, time.Now(), &err)
