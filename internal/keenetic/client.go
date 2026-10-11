@@ -35,6 +35,9 @@ type Client struct {
 	// ssh.FingerprintSHA256 ("SHA256:..."). Пусто -> ключ не проверяется
 	// (приемлемо для LAN, но в проде задавайте фингерпринт).
 	HostKeyFingerprint string
+	// KeenDNSZone — собственная зона KeenDNS роутера (KEENDNS_ZONE). Пусто ->
+	// EnsureProxy зоны не знает и `domain static` не проверяет.
+	KeenDNSZone string
 
 	mu sync.Mutex // сериализуем доступ: правки конфига не потокобезопасны
 }

@@ -8,6 +8,7 @@ you may not use this file except in compliance with the License.
 package keenetic
 
 import (
+	"context"
 	"reflect"
 	"strings"
 	"testing"
@@ -251,6 +252,39 @@ func TestValidateProxyRejectsCommandInjection(t *testing.T) {
 
 // Интерактивный шелл не возвращает код команды: без разбора вывода отвергнутая
 // команда неотличима от применённой, и CR уходил бы в Ready на пустом месте.
+// `domain static` с собственной зоной KeenDNS — ровно то, что выходило, когда
+// устаревшая CRD молча съедала spec.ndns. Отказ обязан случиться до роутера.
+// Остальные строки обязаны дойти до SSH и упасть на dial к пустому Host: тихий
+// nil без похода к роутеру иначе тоже сошёл бы за «пропустили».
+func TestEnsureProxyRefusesStaticInsideKeenDNSZone(t *testing.T) {
+	base := Proxy{Name: "notes", Scheme: "https", Address: "192.168.99.44", Port: 443, SecurityLevel: "public"}
+	for _, tt := range []struct {
+		name       string
+		clientZone string
+		ndns       bool
+		zone       string
+		refused    bool
+	}{
+		{"static inside the KeenDNS zone", "example.keenetic.link", false, "Example.keenetic.link", true},
+		{"ndns inside the KeenDNS zone", "example.keenetic.link", true, "", false},
+		{"static on an own domain", "example.keenetic.link", false, "example.com", false},
+		{"zone not configured", "", false, "example.keenetic.link", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p := base
+			p.NDNS, p.Zone = tt.ndns, tt.zone
+			err := (&Client{KeenDNSZone: tt.clientZone}).EnsureProxy(context.Background(), p)
+			want := "dial"
+			if tt.refused {
+				want = "refusing"
+			}
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("EnsureProxy() = %v, want an error containing %q", err, want)
+			}
+		})
+	}
+}
+
 func TestRefusalErrorSpotsARejectedCommand(t *testing.T) {
 	out := strings.Join([]string{
 		"(config)> ip http proxy notes",

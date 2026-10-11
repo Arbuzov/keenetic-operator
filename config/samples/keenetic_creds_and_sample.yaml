@@ -14,6 +14,10 @@ stringData:
   # --- публикация веб-приложений наружу (ip http proxy) ---
   # Пусто -> публикации выключены, оператор ведёт только DNS-записи.
   DEFAULT_UPSTREAM_IP: "192.168.99.44"   # адрес ingress-контроллера ЗА роутером
+  # Собственная зона KeenDNS роутера: хосты в ней публикуются через `domain ndns`,
+  # а `domain static <зона>` оператор отказывается писать — такая запись отвечает
+  # за голую зону. Пусто — только для собственных доменов.
+  KEENDNS_ZONE: "whitediver.keenetic.link"
   # DEFAULT_UPSTREAM_PORT: "80"
   # DEFAULT_UPSTREAM_SCHEME: "http"
   # DEFAULT_SECURITY_LEVEL: "public"     # public = «свободный доступ» из интернета
@@ -41,6 +45,7 @@ metadata:
 spec:
   name: nas                              # `ip http proxy nas` на роутере
   domain: nas.whitediver.keenetic.link
+  ndns: true                             # домен прямо в зоне KeenDNS: только так имя публикуется
   upstreamAddress: 192.168.99.44
   upstreamPort: 80
   upstreamScheme: http

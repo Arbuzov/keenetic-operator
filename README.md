@@ -118,7 +118,7 @@ The manager reads credentials from the environment (wire them from a Secret via 
 | `DEFAULT_UPSTREAM_SCHEME` | `http` | `http` or `https` |
 | `DEFAULT_SECURITY_LEVEL` | `public` | `public` (reachable from the internet) or `private` (only after signing in to the router) |
 | `PUBLISH_BY_DEFAULT` | `true` | Whether an Ingress with no publish annotation is published |
-| `KEENDNS_ZONE` | — | The router's own KeenDNS zone, e.g. `example.keenetic.link`. Hosts one label below it are published with `domain ndns`, the only form that claims a name in KeenDNS. Leave it unset only for your own domains |
+| `KEENDNS_ZONE` | — | The router's own KeenDNS zone, e.g. `example.keenetic.link`. Hosts one label below it are published with `domain ndns`, the only form that claims a name in KeenDNS, and `domain static <zone>` is refused outright. Leave it unset only for your own domains |
 
 Per-Ingress annotations override the defaults; none are required:
 
@@ -219,17 +219,21 @@ Two consequences worth knowing:
   `notes.notes.example.keenetic.link`. The real name is then claimed by nobody and the
   router answers it with its own web panel — a 200 with the wrong body, which is why this
   cost an outage before it was noticed. Inside the router's own KeenDNS zone the form to
-  use is `domain ndns`; `domain static` there produces a valid entry that never publishes.
-  The two are compared strictly for the same reason.
+  use is `domain ndns`; `domain static` there produces a valid entry that never publishes
+  and answers for the bare zone instead, so the zone's own name gets proxied to the
+  upstream. The two are compared strictly for the same reason, and with `KEENDNS_ZONE` set
+  the operator refuses to write `domain static <zone>` at all — the publication goes
+  `Ready=False` instead. That form only reaches the actuator when `spec.ndns` was lost on
+  the way, typically a cluster CRD older than the field: the API server drops unknown
+  fields with nothing but a warning, so apply `config/crd` (or the chart's `crds/`) on
+  every upgrade.
 - `preserve-host` is not cosmetic. Without it the router forwards `Host: <upstream ip>`,
   no ingress rule matches, and every published host answers 404.
 - Comparison before writing is deliberately lenient: a field the router did not print is
   treated as matching. Every rewrite is a `system configuration save`, i.e. a flash write,
   repeated every 5 minutes forever; a field the router stores but does not display would
-  otherwise never converge and would burn flash for nothing. The same reasoning covers
-  `domain ndns`: the router may normalise a `domain static` name inside its own KeenDNS
-  zone back to `ndns`, and that is accepted as equivalent when the entry name matches the
-  domain's first label.
+  otherwise never converge and would burn flash for nothing. `domain` is the one
+  exception and is compared strictly, as above.
 
 ## Metrics
 
